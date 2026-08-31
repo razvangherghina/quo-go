@@ -21,6 +21,17 @@
 // at it, so that the ground it dialled can ask down the connection it never
 // opened — which is the whole reason a line is worth holding.
 //
+// Serving over a line, -push is the other half of that: this ground asks down
+// a connection it accepted. A standing granted back never travels on the wire,
+// so it is handed to this command one JSON object per line on stdin, and each
+// is spent on a line this door accepted.
+//
+// Serving with -relay <facts>, this ground stands as the middle of a chain: it
+// holds a Brief of its own whose one field is answered by reaching a third
+// house, under the leash it was handed rather than under one of its own. That
+// is Article III's "each hop acts as itself", and it needs a being that does
+// its work by asking somebody else.
+//
 // The facts line is JSON because a hint is an opaque string the protocol never
 // parses, and a space-separated line cannot carry one that holds a space. It
 // is the only line this command writes that is meant to be read by a machine
@@ -29,6 +40,7 @@
 package main
 
 import (
+	"bufio"
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
@@ -60,6 +72,13 @@ import (
 const Counter = `Counter
   bump(by int) int
   count() int
+`
+
+// Brief is what a relaying ground puts in front of whoever it answers to, and
+// the whole of it: one field, answering a number it does not itself hold.
+// There is no way to write to the far house through it.
+const Brief = `Brief
+  filed() int
 `
 
 func main() {
@@ -104,6 +123,11 @@ func serve(args []string) error {
 	listen := fs.String("listen", "127.0.0.1:0", "where the door hangs")
 	limit := fs.Int64("limit", 1<<20, "what this door will take, the one fact the law makes a warden publish")
 	framed := fs.Bool("line", false, "hang the door on the framed TCP carriage instead of HTTP")
+	pushing := fs.Bool("push", false, "ask down a line this ground accepted, spending a standing handed to it on stdin")
+	beingHex := fs.String("being", "", `which being to push at; "auto" is the one the describe found that is not the far door's own`)
+	method := fs.String("method", "", "the field to push at it, or empty for a describe alone")
+	argsHex := fs.String("args", "", "that field's arguments, already encoded, as hex; on a relay, the entry it files in the far house's book")
+	relaying := fs.String("relay", "", "stand as the middle of a chain: hold a Brief whose one field is answered by reaching the house these facts name")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -113,25 +137,55 @@ func serve(args []string) error {
 		return err
 	}
 	g := &ground{w: w}
-	being, err := w.Hold(Counter, &counter{}, warden.Keys{Secret: draw(), HeirSecret: draw()})
+	// A relay has already spoken to a third house before it is ready to be
+	// spoken to, and what it found waits behind the facts: the facts line is
+	// the first line this command writes, whatever else it did to get there.
+	var being [32]byte
+	var found map[string]any
+	if *relaying != "" {
+		being, found, err = relay(g, *relaying, *argsHex)
+	} else {
+		being, err = w.Hold(Counter, &counter{}, warden.Keys{Secret: draw(), HeirSecret: draw()})
+	}
 	if err != nil {
 		return err
 	}
 
 	if *framed {
+		// A ground that pushes keeps every line it accepts, because the standing
+		// it will spend down one arrives later and by another road entirely.
+		accepted := make(chan *line.Line, 8)
+		var arriving func(*line.Line)
+		if *pushing {
+			arriving = func(l *line.Line) {
+				select {
+				case accepted <- l:
+				default:
+				}
+			}
+		}
 		// The listening half is the one that knows where it ended up, so it is
 		// the one with a road to grant. Nothing above this changes: the same
 		// warden judges the same messages.
-		ears, err := line.Listen(line.Door{Judge: g.judge, Limit: w.Limit()}, *listen, nil)
+		ears, err := line.Listen(line.Door{Judge: g.judge, Hear: g.hear, Limit: w.Limit()}, *listen, arriving)
 		if err != nil {
 			return err
 		}
 		if err := stranger(w, being, ears.Hint); err != nil {
 			return err
 		}
+		if err := emitFound(found); err != nil {
+			return err
+		}
+		if *pushing {
+			go pushes(g, accepted, *beingHex, *method, *argsHex)
+		}
 		// The listener runs itself, so there is no serve loop to hold this
 		// process up; the driver kills it when it has seen enough.
 		select {}
+	}
+	if *pushing {
+		return errors.New("a push can only ride a line")
 	}
 
 	ln, err := net.Listen("tcp", *listen)
@@ -147,7 +201,18 @@ func serve(args []string) error {
 	if err := stranger(w, being, hint); err != nil {
 		return err
 	}
+	if err := emitFound(found); err != nil {
+		return err
+	}
 	return http.Serve(ln, carriage.Handler(w.Limit(), g.judge))
+}
+
+// What a relay found at the third house, printed once the facts are out.
+func emitFound(found map[string]any) error {
+	if found == nil {
+		return nil
+	}
+	return emit(found)
 }
 
 // stranger mints the invitation and prints the facts line: everything a
@@ -200,10 +265,12 @@ func (g *ground) ask(r warden.Reach) ([]byte, int64, error) {
 	return g.w.Ask(draw(), r)
 }
 
+// hear is the line's frame sorter and not the caller's judgment: it says
+// whether a frame is an answer sealed to this end, and spends nothing. The
+// judgment — the door match and the awaiting record — is the warden's own
+// Hear, taken where the ask was made.
 func (g *ground) hear(message []byte) (envelope.Answer, error) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	return g.w.Hear(g.w.PadlockSecret(), message)
+	return envelope.OpenAnswer(g.w.PadlockSecret(), message)
 }
 
 func (g *ground) roads(far [32]byte) ([]string, bool) {
@@ -262,27 +329,9 @@ func speak(args []string) error {
 		send = downLine(dialled)
 	}
 
-	// Whoever minted a voice has seen its keys, so the holder's first act is a
-	// rotate-and-ask to a key nobody else has ever seen. It asks nothing, and
-	// what comes back is what this voice now stands at.
-	next := draw()
-	estate, err := exchange(g, inv.Warden, "describe", warden.Reach{
-		Far:       inv.Warden,
-		Allowance: envelope.Allowance{Time: 5000, Hops: 8},
-		NextHeir:  &next,
-	}, send)
-	if err != nil {
-		return err
-	}
-	if estate == nil {
-		return nil // the door answered silence, and it has already been reported
-	}
-	classes, err := readEstate(estate.data)
-	if err != nil {
-		return err
-	}
-	if err := emit(estate.with(map[string]any{"classes": classes})); err != nil {
-		return err
+	classes, err := opening(g, inv.Warden, send)
+	if err != nil || classes == nil {
+		return err // silence has already been reported where it happened
 	}
 
 	if *texts {
@@ -330,6 +379,247 @@ func speak(args []string) error {
 		return errors.New("a standing granted back can only ride a line")
 	}
 	return held(g, inv.Warden, road)
+}
+
+// opening is the first act at any door, over any road: whoever minted a voice
+// has seen its keys, so a holder rotates to a key nobody else has ever seen and
+// reads back the estate it now stands at. A nil answer with no error is
+// silence, already reported where it happened.
+func opening(g *ground, far [32]byte, send sender) ([]class, error) {
+	next := draw()
+	estate, err := exchange(g, far, "describe", warden.Reach{
+		Far:       far,
+		Allowance: envelope.Allowance{Time: 5000, Hops: 8},
+		NextHeir:  &next,
+	}, send)
+	if err != nil || estate == nil {
+		return nil, err
+	}
+	classes, err := readEstate(estate.data)
+	if err != nil {
+		return nil, err
+	}
+	return classes, emit(estate.with(map[string]any{"classes": classes}))
+}
+
+// pushes is the other half of -hold, and the half only a listening ground can
+// play: an ask down a connection this ground never opened, spending a standing
+// the dialling ground granted it. The standing never travels on the wire — it
+// is the dialler's own to hand over however it likes — so it arrives here one
+// JSON object per line on stdin, and each is spent on a line this door
+// accepted.
+func pushes(g *ground, accepted <-chan *line.Line, beingHex, method, argsHex string) {
+	reader := bufio.NewScanner(os.Stdin)
+	reader.Buffer(make([]byte, 0, 64*1024), 1<<20)
+	for reader.Scan() {
+		if len(strings.TrimSpace(reader.Text())) == 0 {
+			continue
+		}
+		var f facts
+		if err := json.Unmarshal(reader.Bytes(), &f); err != nil {
+			fail(err)
+		}
+		inv, err := f.standing()
+		if err != nil {
+			fail(err)
+		}
+		if err := push(g, inv, <-accepted, beingHex, method, argsHex); err != nil {
+			fail(err)
+		}
+	}
+}
+
+func push(g *ground, inv wire.Invitation, held *line.Line, beingHex, method, argsHex string) error {
+	g.mu.Lock()
+	g.w.Stand(g.w.Self(), inv, inv.HeirSecret)
+	g.mu.Unlock()
+	send := downLine(held)
+	classes, err := opening(g, inv.Warden, send)
+	if err != nil || classes == nil {
+		return err
+	}
+	if err := emit(map[string]any{"quo": 1, "step": "pushed", "far": hexOf(inv.Warden)}); err != nil {
+		return err
+	}
+	if method == "" {
+		return nil
+	}
+	return invoke(g, inv, beingHex, method, argsHex, classes, send)
+}
+
+// relay makes this ground the middle of a chain. It holds a Brief whose one
+// field it cannot answer alone, and before it is ready to be spoken to it has
+// already spoken to the house whose facts it was handed: rotating, describing,
+// and filing whatever entry it was told to file. What it found is handed back
+// to be printed once the facts are out.
+func relay(g *ground, written, entry string) ([32]byte, map[string]any, error) {
+	var f facts
+	if err := json.Unmarshal([]byte(written), &f); err != nil {
+		return [32]byte{}, nil, err
+	}
+	inv, err := f.invitation()
+	if err != nil {
+		return [32]byte{}, nil, err
+	}
+	b := &brief{g: g, far: inv.Warden, hints: inv.Hints, voice: inv.Heir}
+	being, err := g.w.Hold(Brief, b, warden.Keys{Secret: draw(), HeirSecret: draw()})
+	if err != nil {
+		return [32]byte{}, nil, err
+	}
+	// The relation belongs to the being that spends it, not to the house: it
+	// is Brief that reaches the far house, and nothing else here may.
+	g.w.Stand(being, inv, inv.HeirSecret)
+
+	// The opening, said in this ground's own voice and reported to nobody: a
+	// relay's own errand at the third house is not a step the driver reads.
+	next := draw()
+	estate, err := b.send(warden.Reach{
+		Far:       inv.Warden,
+		Allowance: envelope.Allowance{Time: 5000, Hops: 8},
+		NextHeir:  &next,
+	})
+	if err != nil {
+		return [32]byte{}, nil, err
+	}
+	if estate == nil {
+		return [32]byte{}, nil, errors.New("the far house answered the relay nothing")
+	}
+	classes, err := readEstate(estate.Data)
+	if err != nil {
+		return [32]byte{}, nil, err
+	}
+	book, err := granted(classes)
+	if err != nil {
+		return [32]byte{}, nil, err
+	}
+	b.book = book
+
+	// What this ground put in the far house's book, if it was told to put
+	// anything. Only this ground could have written it and only that house
+	// holds it, so a number read back through Brief came from there and
+	// nowhere else.
+	var filed int64
+	if entry != "" {
+		blob, err := hex.DecodeString(entry)
+		if err != nil {
+			return [32]byte{}, nil, err
+		}
+		wrote, err := b.send(warden.Reach{
+			Far:       inv.Warden,
+			Being:     &book,
+			Method:    &envelope.Method{Name: "bump", Args: blob},
+			Allowance: envelope.Allowance{Time: 5000, Hops: 8},
+		})
+		if err != nil {
+			return [32]byte{}, nil, err
+		}
+		if wrote == nil {
+			return [32]byte{}, nil, errors.New("the far house would not take the relay's entry")
+		}
+		filed, err = readInt(wrote.Data)
+		if err != nil {
+			return [32]byte{}, nil, err
+		}
+	}
+	return being, map[string]any{
+		"quo": 1, "step": "relay",
+		"far":   hexOf(inv.Warden),
+		"being": hexOf(book),
+		"brief": hexOf(being),
+		"filed": filed,
+	}, nil
+}
+
+// brief is a being that does its work by asking somebody else. It reaches the
+// far house under the leash that arrived rather than under one of its own, and
+// hands back what that house said. It never learns who asked it.
+type brief struct {
+	g     *ground
+	far   [32]byte
+	book  [32]byte
+	hints []string
+	// The voice this ground speaks to the far house with: the heir the far
+	// house minted, which the opening rotation spent. It is not the voice this
+	// ground published to whoever calls it, and that is the whole point.
+	voice [32]byte
+}
+
+func (b *brief) Invoke(call warden.Call) ([]byte, error) {
+	if call.Method != "filed" {
+		return nil, errors.New("the blueprint declares no such field")
+	}
+	if len(call.Args) != 0 {
+		return nil, errors.New("filed takes nothing")
+	}
+	leash := call.Leash
+	received := leash.Received()
+	onward, err := leash.Onward()
+	if err != nil {
+		return nil, err
+	}
+	answer, err := b.send(warden.Reach{
+		Far:    b.far,
+		Being:  &b.book,
+		Method: &envelope.Method{Name: "count", Args: []byte{}},
+		Leash:  &leash,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if err := emit(map[string]any{
+		"quo": 1, "step": "relayed",
+		"far":      hexOf(b.far),
+		"voice":    hexOf(b.voice),
+		"received": map[string]any{"time": received.Time, "hops": received.Hops},
+		"onward":   map[string]any{"time": onward.Time, "hops": onward.Hops},
+		"silence":  answer == nil,
+	}); err != nil {
+		return nil, err
+	}
+	if answer == nil {
+		// Silence from the far house is silence from this one: a warden never
+		// narrates what happened behind it.
+		return nil, errors.New("the far house said nothing")
+	}
+	// Both fields ride as one `int`, so what the far house answered is already
+	// what this field answers with.
+	if _, err := readInt(answer.Data); err != nil {
+		return nil, err
+	}
+	return answer.Data, nil
+}
+
+// send is one errand at the far house, reported to nobody: the relay's own
+// conversation is not a step a driver reads. The warden is reached unlocked
+// because a call arrives with this ground's lock already taken — a being doing
+// its work is inside the judgment that routed to it.
+func (b *brief) send(r warden.Reach) (*envelope.Answer, error) {
+	message, seq, err := b.g.w.Ask(draw(), r)
+	if err != nil {
+		return nil, err
+	}
+	reply, err := carriage.Caller{}.Send(b.hints, message)
+	if err != nil {
+		return nil, err
+	}
+	if reply == nil {
+		return nil, nil
+	}
+	answer, err := b.g.w.Hear(b.g.w.PadlockSecret(), reply)
+	if err != nil {
+		return nil, err
+	}
+	if answer.Seq != seq {
+		return nil, fmt.Errorf("the answer names ask %d, not %d", answer.Seq, seq)
+	}
+	return &answer, nil
+}
+
+func readInt(data []byte) (int64, error) {
+	if len(data) != 8 {
+		return 0, errors.New("an answer that is not one int")
+	}
+	return int64(binary.BigEndian.Uint64(data)), nil
 }
 
 // invoke is the one ask this command was asked to make: a field on a being it
@@ -560,7 +850,28 @@ func readOptionalText(data []byte) (any, error) {
 	return wire.Decode(warden.Own, t, data)
 }
 
+// standing reads the five keys and nothing else. A standing granted back down
+// a line carries no road at all, because the ground that granted it has none:
+// it is reachable only down the line it opened.
+func (f facts) standing() (wire.Invitation, error) {
+	inv, err := f.keys()
+	inv.Hints = []string{}
+	return inv, err
+}
+
 func (f facts) invitation() (wire.Invitation, error) {
+	inv, err := f.keys()
+	if err != nil {
+		return wire.Invitation{}, err
+	}
+	if len(f.Hints) == 0 {
+		return wire.Invitation{}, errors.New("those facts carry no road")
+	}
+	inv.Hints = f.Hints
+	return inv, nil
+}
+
+func (f facts) keys() (wire.Invitation, error) {
 	var inv wire.Invitation
 	for _, pair := range []struct {
 		into *[32]byte
@@ -575,10 +886,6 @@ func (f facts) invitation() (wire.Invitation, error) {
 		}
 		*pair.into = k
 	}
-	if len(f.Hints) == 0 {
-		return wire.Invitation{}, errors.New("those facts carry no road")
-	}
-	inv.Hints = f.Hints
 	return inv, nil
 }
 

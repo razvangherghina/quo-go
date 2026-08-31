@@ -1,12 +1,14 @@
 package warden_test
 
 import (
+	"bytes"
 	"reflect"
 	"testing"
 
 	"quo.systems/kit/arithmetic"
 	"quo.systems/kit/envelope"
 	"quo.systems/kit/warden"
+	"quo.systems/kit/wire"
 )
 
 // The inward side of the record — granting, amending, releasing — and the
@@ -174,7 +176,10 @@ func TestTheCountOnlyRisesForOneVoice(t *testing.T) {
 			t.Fatalf("spent %d (%v), want %d", seq, err, want)
 		}
 	}
-	// A rotation starts the count fresh, because the old key died with it.
+	// A rotation starts the count fresh, because the old key died with it —
+	// which brings number one round again, so the first ask's answer must be
+	// out of the awaiting record before the second rotation may be sent.
+	caller.Forgo(g.inv.Warden, 1, [32]byte{})
 	next := secret("callerHeir2")
 	rotate.NextHeir = &next
 	if _, seq, err := caller.Ask(secret("e1"), rotate); err != nil || seq != 1 {
@@ -306,7 +311,7 @@ func TestTheAnswerIsSealedToTheReturnPadlock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reply, err := g.w.Judge(warden.Draws{Ephemeral: secret("answerEphemeral"), Heir: secret("receiveHeir")}, message)
+	reply, err := g.w.Judge(warden.Draws{Ephemeral: secret("answerEphemeral"), Being: secret("receiveBeing"), Heir: secret("receiveHeir")}, message)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -355,6 +360,8 @@ func TestABeingArrivesAbleToActAgain(t *testing.T) {
 			Padlock:    inv.Padlock,
 			Voice:      inv.Heir,
 			Secret:     inv.HeirSecret,
+			Heir:       inv.Heir,
+			HeirSecret: inv.HeirSecret,
 			Seq:        0,
 			Hints:      inv.Hints,
 		}},
@@ -414,8 +421,10 @@ func TestABeingArrivesAbleToActAgain(t *testing.T) {
 	}
 
 	// Pack reads the same row back off the record, so a being that moved once
-	// can move again.
-	again, err := g.w.Pack(arriving, []byte("state"))
+	// can move again — under the name this door minted for it, which is the
+	// name the migration's second news moved its identity to.
+	arrivedAs := arithmetic.SigningKey(secret("receiveBeing"))
+	again, err := g.w.Pack(arrivedAs, []byte("state"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -618,5 +627,170 @@ func TestAMigratedRelationCanStillRotate(t *testing.T) {
 	}
 	if _, err := third.Judge(warden.Draws{Ephemeral: secret("far/answerEphemeral3")}, message); err != nil {
 		t.Fatalf("the far door refused the rotation after the migrated one: %v", err)
+	}
+}
+
+// TestAHintIsCarriedByteForByte holds Article III's plainest rule about a
+// hint: Quo never reads one and never rewrites one. A hint is compared,
+// republished as news and stored in a row, so two spellings of one road would
+// be two roads — which means the bytes that were granted are the bytes that
+// come back.
+func TestAHintIsCarriedByteForByte(t *testing.T) {
+	g := stand(t)
+	// Spellings a kit might be tempted to tidy: a case the URL scheme does not
+	// care about, a leading zero, a trailing slash, a declared cap.
+	hints := []string{
+		"HTTPS://One.Example:00443/",
+		"tcp://[2001:db8::1]:9000?cap=016384",
+		"https://two.example",
+	}
+
+	inv, err := g.w.Grant(g.being,
+		warden.Keys{Secret: secret("hintVoice"), HeirSecret: secret("hintHeir")},
+		g.w.Padlock(), hints)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(inv.Hints, hints) {
+		t.Fatalf("the invitation carries %q", inv.Hints)
+	}
+	if !reflect.DeepEqual(g.w.Card(hints).Hints, hints) {
+		t.Fatal("a card rewrote the roads it publishes")
+	}
+
+	// And a row keeps what it was handed, so what a peer republishes is what it
+	// was told.
+	guest := house(t, "hintGuest")
+	guest.Stand(guest.Self(), inv, inv.HeirSecret)
+	_, _, _, kept, ok := guest.Relation(inv.Warden)
+	if !ok || !reflect.DeepEqual(kept, hints) {
+		t.Fatalf("the row keeps %q", kept)
+	}
+}
+
+// TestAcceptSpendsTheInvitationWhole holds the helper the table ruled every kit
+// offers: an invitation is spent, not held. Whoever minted the voice has seen
+// its keys and its heirs, so it takes two rotate-and-asks — the invitation's
+// heir takes the standing and commits to a voice the granter never saw, then
+// that voice commits to a fresh heir and carries the caller's own ask.
+func TestAcceptSpendsTheInvitationWhole(t *testing.T) {
+	g := stand(t)
+	guest := house(t, "acceptor")
+
+	args, err := wire.Encode(warden.Own, textType(), "milk")
+	if err != nil {
+		t.Fatal(err)
+	}
+	taken, err := guest.Accept(g.inv, warden.Accepting{
+		Holder:      guest.Self(),
+		VoiceSecret: secret("acceptor/voice"),
+		HeirSecret:  secret("acceptor/heir"),
+		Being:       &g.being,
+		Method:      &envelope.Method{Name: "add", Args: args},
+		Allowance:   envelope.Allowance{Time: 5000, Hops: 8},
+		Ephemeral:   [2][32]byte{secret("acceptor/one"), secret("acceptor/two")},
+		Send: func(message []byte) ([]byte, error) {
+			return g.w.Judge(warden.Draws{Ephemeral: secret("answerEphemeral")}, message)
+		},
+	})
+	if err != nil {
+		t.Fatalf("the invitation was not accepted: %v", err)
+	}
+
+	// The ask it carried was answered by the door it was sent to.
+	answer, err := guest.Hear(guest.PadlockSecret(), taken.Answer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if answer.Warden != g.w.Name() || answer.Seq != taken.Seq {
+		t.Fatalf("the answer is %#v", answer)
+	}
+	if !bytes.Equal(answer.Data, args) {
+		t.Fatalf("the being answered %x", answer.Data)
+	}
+
+	// Every key the granter ever held for this standing is dead: the voice it
+	// minted and the heir it handed out both stand nowhere now, which drops
+	// them to the stranger's case.
+	for _, dead := range [][32]byte{secret("voice"), g.inv.HeirSecret} {
+		s := g.say(arithmetic.SigningKey(dead), 7)
+		s.Being = &g.being
+		s.Method = &envelope.Method{Name: "count", Args: []byte{}}
+		// Each signs with its own secret, so what refuses it is the record
+		// rather than the signature.
+		g.silent(g.judge(dead, s))
+	}
+
+	// What stands is the key the caller generated, committed to an heir the
+	// granter never saw.
+	if taken.Voice != arithmetic.SigningKey(secret("acceptor/voice")) {
+		t.Fatal("the standing is not on the voice the caller minted")
+	}
+	if taken.Commitment != arithmetic.Commit(g.w.Name(), arithmetic.SigningKey(secret("acceptor/heir"))) {
+		t.Fatal("the commitment is not the caller's fresh heir at that door")
+	}
+	// And it goes on being spent: the heir it committed rotates in its turn.
+	third := secret("acceptor/third")
+	message, seq, err := guest.Ask(secret("acceptor/three"), warden.Reach{
+		Far: g.inv.Warden, Allowance: envelope.Allowance{Time: 5000, Hops: 8}, NextHeir: &third,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seq != 1 {
+		t.Fatalf("the rotation spent %d, want 1", seq)
+	}
+	if _, err := g.w.Judge(warden.Draws{Ephemeral: secret("answerEphemeral2")}, message); err != nil {
+		t.Fatalf("the door refused the rotation after the accept: %v", err)
+	}
+}
+
+// TestACopyOfTheInvitationCanNoLongerTakeTheStanding holds why the second
+// rotation is not optional: until the holder stands on a key it generated
+// itself, whoever minted the invitation — or anyone holding a copy — can still
+// take the standing at that door.
+func TestACopyOfTheInvitationCanNoLongerTakeTheStanding(t *testing.T) {
+	g := stand(t)
+	guest := house(t, "acceptor")
+	if _, err := guest.Accept(g.inv, warden.Accepting{
+		Holder:      guest.Self(),
+		VoiceSecret: secret("acceptor/voice"),
+		HeirSecret:  secret("acceptor/heir"),
+		Being:       &g.being,
+		Method:      &envelope.Method{Name: "count", Args: []byte{}},
+		Allowance:   envelope.Allowance{Time: 5000, Hops: 8},
+		Ephemeral:   [2][32]byte{secret("acceptor/one"), secret("acceptor/two")},
+		Send: func(message []byte) ([]byte, error) {
+			return g.w.Judge(warden.Draws{Ephemeral: secret("answerEphemeral")}, message)
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Somebody else holding the same invitation replays the holder's first act.
+	thief := house(t, "thief")
+	thief.Stand(thief.Self(), g.inv, g.inv.HeirSecret)
+	mine := secret("thief/heir")
+	message, _, err := thief.Ask(secret("thief/ephemeral"), warden.Reach{
+		Far: g.inv.Warden, Allowance: envelope.Allowance{Time: 5000, Hops: 8}, NextHeir: &mine,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The thief's voice is found nowhere, so it is answered as any stranger is
+	// — the commitment it carries is ignored rather than refused. What matters
+	// is that it takes nothing: the standing stayed where the accept left it.
+	before := g.w.Standings(g.being)
+	if _, err := g.w.Judge(warden.Draws{Ephemeral: secret("answerEphemeral3")}, message); err != nil {
+		t.Fatalf("a stranger carrying a commitment met silence: %v", err)
+	}
+	after := g.w.Standings(g.being)
+	if len(after) != len(before) {
+		t.Fatal("a copy of a spent invitation took the standing")
+	}
+	for at := range before {
+		if before[at] != after[at] {
+			t.Fatal("a copy of a spent invitation moved the standing")
+		}
 	}
 }

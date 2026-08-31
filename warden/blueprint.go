@@ -62,6 +62,7 @@ cargo
 standing
   voice b32
   commitment b32
+  name b32
   beings [being]
   mark int
   spent [int]
@@ -77,6 +78,7 @@ relation
   heir b32
   heirSecret b32
   seq int
+  news int
   hints [text]
 `
 
@@ -152,11 +154,14 @@ type Word struct {
 type Standing struct {
 	Voice      [32]byte
 	Commitment [32]byte
-	Beings     [][32]byte
-	Mark       int64
-	Spent      []int64
-	Padlock    *[32]byte
-	Hints      []string
+	// Name is the door name this heir commitment was hashed under. Without it
+	// a migrated standing could never verify an older commitment again.
+	Name    [32]byte
+	Beings  [][32]byte
+	Mark    int64
+	Spent   []int64
+	Padlock *[32]byte
+	Hints   []string
 }
 
 // Relation is one outbound row as it travels with a migrating being. A being
@@ -177,7 +182,10 @@ type Relation struct {
 	Heir       [32]byte
 	HeirSecret [32]byte
 	Seq        int64
-	Hints      []string
+	// News is the mark kept for that far warden's news, which is its own
+	// counter and never the one this door sends by.
+	News  int64
+	Hints []string
 }
 
 // Cargo is a migration's state transfer: the being, its class, its cells, and
@@ -316,6 +324,7 @@ func cargoValue(c Cargo) map[string]any {
 		standings = append(standings, map[string]any{
 			"voice":      s.Voice,
 			"commitment": s.Commitment,
+			"name":       s.Name,
 			"beings":     beings,
 			"mark":       s.Mark,
 			"spent":      spent,
@@ -334,6 +343,7 @@ func cargoValue(c Cargo) map[string]any {
 			"heir":       r.Heir,
 			"heirSecret": r.HeirSecret,
 			"seq":        r.Seq,
+			"news":       r.News,
 			"hints":      hintList(r.Hints),
 		})
 	}
@@ -443,6 +453,9 @@ func readCargo(v any) (Cargo, error) {
 		if s.Commitment, err = key(sf, "commitment"); err != nil {
 			return Cargo{}, err
 		}
+		if s.Name, err = key(sf, "name"); err != nil {
+			return Cargo{}, err
+		}
 		beings, ok := sf["beings"].([]any)
 		if !ok {
 			return Cargo{}, errors.New("warden: the beings are not a list")
@@ -499,6 +512,9 @@ func readCargo(v any) (Cargo, error) {
 		}
 		if r.Seq, ok = rf["seq"].(int64); !ok {
 			return Cargo{}, errors.New("warden: the seq is not a number")
+		}
+		if r.News, ok = rf["news"].(int64); !ok {
+			return Cargo{}, errors.New("warden: the news mark is not a number")
 		}
 		if r.Hints, err = readHints(rf["hints"]); err != nil {
 			return Cargo{}, err

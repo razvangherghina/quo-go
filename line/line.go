@@ -2,8 +2,9 @@
 // frames over one persistent TCP connection. It is for the roads where both
 // ends are consenting grounds — droplet to droplet, same machine, a held line —
 // where TLS and HTTP buy nothing, because the envelope already carries all the
-// crypto. It is a private carriage: the law names it nowhere and needs to name
-// it nowhere.
+// crypto. Article III names it, which makes it standard and never mandatory:
+// the common carriage stays the one road every warden answers, because a
+// browser tab can open no socket and reach outranks fit.
 //
 // A frame is a length written the way the wire encoding writes an `int` — eight
 // bytes, signed two's complement, most significant first — and then that many
@@ -73,6 +74,12 @@ type Door struct {
 	// Hear opens an arriving frame as an answer sealed to this end, under the
 	// padlock secret the asks from this end named. The error is the ordinary
 	// "this was not an answer to me", which is most frames.
+	//
+	// It tells the two records apart and nothing more, so it is
+	// envelope.OpenAnswer and never the warden's own Hear: judging an answer
+	// spends the awaiting record the caller keeps for it, and a road that
+	// spent it while sorting frames would leave nothing for the caller to
+	// judge. The road demultiplexes; the caller judges.
 	Hear func(message []byte) (envelope.Answer, error)
 
 	// Limit is the frame cap this end accepts: the number the host gave, else
@@ -115,6 +122,11 @@ type Line struct {
 	// far is the cap the road at the other end promised — the default wherever
 	// nothing was declared, which is the dialling half always.
 	far int64
+	// near is what this end accepts on an arriving frame. A listener accepts
+	// what its published road declared; a dialler publishes nothing, so it has
+	// no way to promise more than the default and accepts exactly that,
+	// whatever its own appetite.
+	near int64
 
 	mu sync.Mutex
 	// What this end is waiting to hear, keyed by the far warden and the number
@@ -124,8 +136,8 @@ type Line struct {
 	once    sync.Once
 }
 
-func hold(conn net.Conn, door Door, far int64) *Line {
-	l := &Line{conn: conn, door: door, far: far, pending: map[Expect]chan []byte{}, alive: true}
+func hold(conn net.Conn, door Door, far, near int64) *Line {
+	l := &Line{conn: conn, door: door, far: far, near: near, pending: map[Expect]chan []byte{}, alive: true}
 	go l.read()
 	return l
 }
@@ -227,7 +239,7 @@ func (l *Line) read() {
 			return
 		}
 		claimed := int64(binary.BigEndian.Uint64(header))
-		if claimed <= 0 || claimed > l.door.cap() {
+		if claimed <= 0 || claimed > l.near {
 			return
 		}
 		body := make([]byte, claimed)
@@ -313,7 +325,9 @@ func road(hint string) (string, int64, error) {
 	if err != nil || host == "" {
 		return "", 0, ErrNotALine
 	}
-	if _, err := strconv.ParseUint(port, 10, 16); err != nil {
+	// A hint declaring a cap of zero or a port of zero names a door that can
+	// take nothing, and is no road at all.
+	if n, err := strconv.ParseUint(port, 10, 16); err != nil || n == 0 {
 		return "", 0, ErrNotALine
 	}
 	return rest, far, nil
@@ -334,7 +348,9 @@ func Dial(door Door, hint string) (*Line, error) {
 	if err != nil {
 		return nil, err
 	}
-	return hold(conn, door, far), nil
+	// This half publishes nothing and so promises the default, and there is no
+	// way to promise more: what it accepts is the default exactly.
+	return hold(conn, door, far, DEFAULT), nil
 }
 
 // Listener is the listening half. It is the one that knows where it ended up,
@@ -386,7 +402,7 @@ func (s *Listener) serve(door Door) {
 		}
 		// Whoever dialled published nothing, so what this end may send down an
 		// accepted line is the default and only the default.
-		l := hold(conn, door, DEFAULT)
+		l := hold(conn, door, DEFAULT, door.cap())
 		s.mu.Lock()
 		if !s.open {
 			s.mu.Unlock()
@@ -427,4 +443,106 @@ func (s *Listener) Close() error {
 		l.Close()
 	}
 	return s.listener.Close()
+}
+
+// Caller is the caller a ground with sockets under it holds. It walks the roads
+// a peer offered, takes the line wherever one is offered, and falls through to
+// the common carriage everywhere else — and nothing at a call site says which,
+// because choosing among a peer's hints is the caller's whole job.
+//
+// Which roads a caller can speak is never configured and never passed. In Go it
+// is answered at build time: a program that imports this package has sockets
+// under it, and one that does not holds carriage.Caller and speaks the common
+// carriage alone. There is no browser under a Go binary, so unlike the JS kit
+// there is nothing here to find out at runtime.
+//
+// The lines it dials are kept, one per road, because a line is persistent by
+// definition: a fresh connection per ask would be the common carriage wearing a
+// socket, and it would leave a ground that publishes nothing unreachable
+// between calls. They belong to the ground that took them up, so HangUp is how
+// they are put down.
+type Caller struct {
+	// Door is what an arriving frame is handed to on a line this caller
+	// dialled. A caller without one cannot hold a line, so it walks past every
+	// tcp:// hint and posts.
+	Door Door
+
+	// Carriage is the common carriage this caller falls through to. Its zero
+	// value works.
+	Carriage carriage.Caller
+
+	mu    sync.Mutex
+	lines map[string]*Line
+}
+
+// Send carries the message down the first road this caller can speak that
+// actually carried it, and hands back the sealed answer. expect names the ask
+// this caller wants an answer to, for the roads that need naming; the common
+// carriage needs none, because its answer rides its own response.
+//
+// A road this caller cannot speak is not a road that failed: nothing was sent,
+// so no door spoke and no road broke. It is walked past exactly as a hint that
+// was never offered would be, and it is never the fault reported at the end.
+func (c *Caller) Send(hints []string, message []byte, expect *Expect) ([]byte, error) {
+	var last error
+	for _, hint := range hints {
+		if strings.HasPrefix(hint, "tcp://") {
+			if c.Door.Judge == nil {
+				continue
+			}
+			reply, err := c.overLine(hint, message, expect)
+			if err != nil {
+				last = err
+				continue
+			}
+			return reply, nil
+		}
+		reply, err := c.Carriage.Send([]string{hint}, message)
+		if err != nil {
+			last = err
+			continue
+		}
+		return reply, nil
+	}
+	if last != nil {
+		return nil, last
+	}
+	// Every hint was a road this caller cannot speak, so no road was tried at
+	// all. That is not weather: there is no fault to report the road of.
+	return nil, nil
+}
+
+func (c *Caller) overLine(hint string, message []byte, expect *Expect) ([]byte, error) {
+	c.mu.Lock()
+	if c.lines == nil {
+		c.lines = map[string]*Line{}
+	}
+	held, ok := c.lines[hint]
+	c.mu.Unlock()
+	if !ok || !held.Open() {
+		dialled, err := Dial(c.Door, hint)
+		if err != nil {
+			return nil, err
+		}
+		c.mu.Lock()
+		c.lines[hint] = dialled
+		c.mu.Unlock()
+		held = dialled
+	}
+	return <-held.Carry(message, expect), nil
+}
+
+// HangUp lets go of every line this caller dialled. A line is a held resource
+// and the ground that took it up is the one that puts it down.
+func (c *Caller) HangUp() {
+	c.mu.Lock()
+	held := make([]*Line, 0, len(c.lines))
+	for _, l := range c.lines {
+		held = append(held, l)
+	}
+	c.lines = nil
+	c.mu.Unlock()
+	for _, l := range held {
+		l.Close()
+	}
 }

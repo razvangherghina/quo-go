@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/binary"
+	"errors"
 	"testing"
 
 	"quo.systems/kit/arithmetic"
@@ -280,6 +281,62 @@ func TestTheAnswerNamesTheAskBySeq(t *testing.T) {
 	}
 	if _, err := envelope.OpenAnswer(returnSecret, forged); err == nil {
 		t.Fatal("an answer signed by another key opened")
+	}
+}
+
+// TestAnAnswerIsVerifiedAgainstTheWardenItsRecordCarries holds Article XI's
+// two checks and keeps them apart. The signature is verified against the
+// `warden` the record itself carries — an impostor who signs consistently gets
+// no further than an answer nobody asked for — and that this warden is the door
+// the ask was sent to is the caller's own separate judgment.
+func TestAnAnswerIsVerifiedAgainstTheWardenItsRecordCarries(t *testing.T) {
+	returnPadlock, returnSecret := padlockOf(t, "return")
+	impostor := draw("impostor")
+
+	// Consistent all the way through: the name in the record is the key that
+	// signed. This opens, because the record's own claim is what is checked.
+	sealed, err := envelope.SealAnswer(draw("ephemeral"), returnPadlock, impostor, envelope.Answer{
+		Warden: arithmetic.SigningKey(impostor),
+		Seq:    7,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	back, err := envelope.OpenAnswer(returnSecret, sealed)
+	if err != nil {
+		t.Fatalf("an answer that names its own signer was refused: %v", err)
+	}
+	// And here is where it dies: the caller asked another door, and no signature
+	// makes this the door it asked.
+	if back.Warden == arithmetic.SigningKey(draw("name")) {
+		t.Fatal("an impostor answered under the door's own name")
+	}
+
+	// A record naming one warden and signed by another is refused, which is the
+	// first check doing its work.
+	crossed, err := envelope.SealAnswer(draw("ephemeral"), returnPadlock, impostor, envelope.Answer{
+		Warden: arithmetic.SigningKey(draw("name")),
+		Seq:    7,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := envelope.OpenAnswer(returnSecret, crossed); err == nil {
+		t.Fatal("an answer wearing a name it could not sign for opened")
+	}
+}
+
+// TestACallerReadingAnAnswerTakesOnlyTheAnswerByte holds that there is no
+// generic open at the caller's end either: the expected byte is checked, never
+// merely read, so a well-formed say sealed to the caller decides nothing.
+func TestACallerReadingAnAnswerTakesOnlyTheAnswerByte(t *testing.T) {
+	returnPadlock, returnSecret := padlockOf(t, "return")
+	say, err := envelope.SealSay(draw("ephemeral"), returnPadlock, draw("voice"), wellFormed(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := envelope.OpenAnswer(returnSecret, say); !errors.Is(err, envelope.ErrWrongRecord) {
+		t.Fatalf("a say was read as an answer: %v", err)
 	}
 }
 

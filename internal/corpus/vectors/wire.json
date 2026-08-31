@@ -82,6 +82,13 @@
       "bytes": "0000000000000004f09f9493"
     },
     {
+      "name": "text carrying a byte order mark",
+      "law": "The wire encoding of the types",
+      "blueprint": "Probe\n  probe() text\n",
+      "value": "﻿hello",
+      "bytes": "0000000000000008efbbbf68656c6c6f"
+    },
+    {
       "name": "bytes empty",
       "law": "The wire encoding of the types",
       "blueprint": "Probe\n  probe() bytes\n",

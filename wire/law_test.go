@@ -97,6 +97,69 @@ func TestTextCountsBytesRatherThanCharacters(t *testing.T) {
 	writes(t, "text", "hi", "00000000000000026869")
 }
 
+// TestAnEncoderRefusesWhatNoDecoderMayRead holds the encoder's half of the
+// UTF-8 rule: a kit may not write what no kit may read. A Go string is bytes
+// and can hold what is no code point at all, so the refusal has to be made
+// rather than inherited from the language.
+func TestAnEncoderRefusesWhatNoDecoderMayRead(t *testing.T) {
+	bp, ty := under(t, "text")
+	for _, s := range []string{"\xff", "a\x80b", "\xed\xa0\x80"} {
+		if _, err := wire.Encode(bp, ty, s); err == nil {
+			t.Errorf("wrote text that is not UTF-8: %q", s)
+		}
+		// And what the encoder refuses to write, the decoder refuses to read.
+		b := append(make([]byte, 8), s...)
+		b[7] = byte(len(s))
+		if _, err := wire.Decode(bp, ty, b); err == nil {
+			t.Errorf("read text that is not UTF-8: %q", s)
+		}
+	}
+	// The same refusal guards the hints, which are the one [text] this package
+	// writes without walking the general list.
+	if _, err := wire.Encode(bp, notation.Type{Kind: notation.KindCard},
+		wire.Card{Hints: []string{"\xff"}}); err == nil {
+		t.Error("wrote a hint that is not UTF-8")
+	}
+}
+
+// TestATextIsCarriedAsGivenAndNeverNormalised holds that two normalisation
+// forms are two values: a kit that repaired or normalised would have forged a
+// second spelling of a thing this protocol names by the hash of its bytes.
+func TestATextIsCarriedAsGivenAndNeverNormalised(t *testing.T) {
+	composed := "é"    // é as one code point
+	decomposed := "é" // and as e plus a combining accent
+	// A byte order mark inside a value is ordinary content, at the head as
+	// much as in the middle. It is built from its bytes because a Go source
+	// file may not carry one of its own.
+	bom := string([]byte{0xEF, 0xBB, 0xBF})
+	markInside := bom + "hi" + bom + "no"
+
+	bp, ty := under(t, "text")
+	seen := map[string]bool{}
+	for _, s := range []string{composed, decomposed, markInside} {
+		got, err := wire.Encode(bp, ty, s)
+		if err != nil {
+			t.Fatalf("%q was refused: %v", s, err)
+		}
+		if !bytes.Equal(got[8:], []byte(s)) {
+			t.Fatalf("%q was written as %q", s, got[8:])
+		}
+		back, err := wire.Decode(bp, ty, got)
+		if err != nil {
+			t.Fatalf("%q would not read back: %v", s, err)
+		}
+		// The mark is kept rather than stripped: a decoder that ate it would
+		// hand back a second spelling of what arrived.
+		if back.(string) != s {
+			t.Fatalf("%q came back as %q", s, back)
+		}
+		seen[hex.EncodeToString(got)] = true
+	}
+	if len(seen) != 3 {
+		t.Fatal("two of these three values ride the same bytes")
+	}
+}
+
 // TestTextIsUTF8AfterItsLength holds the encoding and the length together, on
 // a string whose bytes and characters differ.
 func TestTextIsUTF8AfterItsLength(t *testing.T) {

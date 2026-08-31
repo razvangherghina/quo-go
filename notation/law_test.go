@@ -191,8 +191,10 @@ func TestANameMayNotAppearTwiceInOneBlock(t *testing.T) {
 func TestTheTypesAreClosed(t *testing.T) {
 	for _, name := range []string{"bool", "int", "text", "bytes", "b32", "being", "invitation", "card"} {
 		accepts(t, "C\n  f() "+name+"\n")
-		// A closed type's name is not a block's to take.
+		// A closed type's name is not a block's to take, and the class block is
+		// a block: one name with two meanings is what the rule forbids.
 		refuses(t, "a record wearing "+name+"'s name", "C\n  f() "+name+"\n\n"+name+"\n  x int\n")
+		refuses(t, "a class wearing "+name+"'s name", name+"\n  f() bool\n")
 	}
 	// Both combinators compose freely over a card, as over everything else.
 	accepts(t, "C\n  f() [card]\n")

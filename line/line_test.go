@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"sync"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"quo.systems/kit/arithmetic"
+	"quo.systems/kit/carriage"
 	"quo.systems/kit/envelope"
 	"quo.systems/kit/line"
 	"quo.systems/kit/warden"
@@ -84,9 +86,7 @@ func door(w *warden.Warden, label string) line.Door {
 			return reply
 		},
 		Hear: func(message []byte) (envelope.Answer, error) {
-			mu.Lock()
-			defer mu.Unlock()
-			return w.Hear(w.PadlockSecret(), message)
+			return envelope.OpenAnswer(w.PadlockSecret(), message)
 		},
 		Limit: w.Limit(),
 	}
@@ -610,9 +610,238 @@ func TestAHintThatIsNotALineIsNotDialled(t *testing.T) {
 		"tcp://" + at + "?cap=16384&x=1",
 		"tcp://" + at + "?cap=0",
 		"tcp://" + at + "?limit=16384",
+		// A cap of zero or a port of zero names a door that can take nothing,
+		// and is no road at all.
+		"tcp://127.0.0.1:0",
+		"tcp://127.0.0.1:0?cap=16384",
 	} {
 		if _, err := line.Dial(door(guest, "guest"), hint); !errors.Is(err, line.ErrNotALine) {
 			t.Fatalf("%q was taken for a line: %v", hint, err)
 		}
+	}
+}
+
+// TestTheDiallingEndAcceptsTheDefaultAndNoMore holds the law's plainest words
+// about the two ends: an end that publishes nothing promises the default, and
+// there is no way to promise more. So what a dialler accepts on an arriving
+// frame is the default exactly, whatever its own appetite — this one's is
+// sixty-four times larger.
+func TestTheDiallingEndAcceptsTheDefaultAndNoMore(t *testing.T) {
+	guest := stand(t, "guest", 1<<20)
+
+	// The far half is plain TCP, because what is being asserted is framing
+	// rather than judgment: this end writes the frames by hand.
+	ears, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ears.Close() }()
+	conns := make(chan net.Conn, 2)
+	go func() {
+		for {
+			conn, err := ears.Accept()
+			if err != nil {
+				return
+			}
+			conns <- conn
+		}
+	}()
+
+	hint := "tcp://" + ears.Addr().String()
+	// The header alone is what the cap is judged on, before anything says what
+	// the frame carries; a body written after it would only race the drop.
+	frame := func(n int64, body bool) net.Conn {
+		t.Helper()
+		l, err := line.Dial(door(guest, "guest"), hint)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(l.Close)
+		conn := <-conns
+		t.Cleanup(func() { _ = conn.Close() })
+		out := header(n)
+		if body {
+			out = append(out, make([]byte, n)...)
+		}
+		if _, err := conn.Write(out); err != nil {
+			t.Fatal(err)
+		}
+		return conn
+	}
+
+	// One byte over the default and the dialler drops without a word, though
+	// its own door would have taken a megabyte.
+	dropped(t, frame(line.DEFAULT+1, false))
+
+	// At the default the frame is read, and what it holds is no box at all —
+	// ordinary silence, and the line lives.
+	at := frame(line.DEFAULT, true)
+	_ = at.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	if _, err := at.Read(make([]byte, 1)); !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("a frame at the default was answered or dropped: %v", err)
+	}
+}
+
+// TestADeclaredCapIsAFloor holds the other half of a published cap: a door may
+// accept more than it promised, never less. The boundary is the number on the
+// road, byte for byte — at it the frame is read, one over it the peer that
+// cannot frame is dropped without a word.
+func TestADeclaredCapIsAFloor(t *testing.T) {
+	h := listening(t, 4096)
+	if !strings.HasSuffix(h.listener.Hint, "?cap=4096") {
+		t.Fatalf("a small door published %q", h.listener.Hint)
+	}
+
+	at := raw(t, h.listener.Hint)
+	if _, err := at.Write(append(header(4096), make([]byte, 4096)...)); err != nil {
+		t.Fatal(err)
+	}
+	_ = at.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	if _, err := at.Read(make([]byte, 1)); !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("a frame at the declared cap was answered or dropped: %v", err)
+	}
+
+	over := raw(t, h.listener.Hint)
+	if _, err := over.Write(header(4097)); err != nil {
+		t.Fatal(err)
+	}
+	dropped(t, over)
+}
+
+// TestADeadRoadIsWeatherRatherThanSilence holds the distinction the law draws
+// in words: a road that never carried the bytes — a connection refused, a name
+// that does not resolve — said neither an answer nor silence, and a kit reports
+// it as the road's fault rather than inventing an empty body.
+func TestADeadRoadIsWeatherRatherThanSilence(t *testing.T) {
+	guest := stand(t, "guest", 1<<20)
+
+	// A port nobody is listening on: the address is well formed, so the hint is
+	// a line, and what fails is the weather.
+	ears, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := ears.Addr().String()
+	if err := ears.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if l, err := line.Dial(door(guest, "guest"), "tcp://"+at); err == nil {
+		l.Close()
+		t.Fatal("a dead road opened a line")
+	} else if errors.Is(err, line.ErrNotALine) {
+		t.Fatal("weather was reported as a malformed hint")
+	}
+
+	// And a name that does not resolve is the same weather, told apart from a
+	// hint this carriage does not speak.
+	if l, err := line.Dial(door(guest, "guest"), "tcp://no.such.host.invalid:9"); err == nil {
+		l.Close()
+		t.Fatal("an unresolvable name opened a line")
+	} else if errors.Is(err, line.ErrNotALine) {
+		t.Fatal("weather was reported as a malformed hint")
+	}
+}
+
+// TestACallerTakesTheRoadItCanSpeak holds the caller's whole job: a warden
+// offers as many roads as it has, and the caller takes the first one it can
+// speak that carried. Nothing at the call site says which, and nothing was
+// configured — in Go the answer is settled at build time, by whether the
+// program imports this package at all.
+func TestACallerTakesTheRoadItCanSpeak(t *testing.T) {
+	h := listening(t, 1<<20)
+
+	// The house stands on both roads at once and ranks neither: it offers what
+	// it has and the caller chooses.
+	carriageDoor := carriage.Handler(h.warden.Limit(), door(h.warden, "house").Judge)
+	served := httptest.NewServer(carriageDoor)
+	t.Cleanup(served.Close)
+	hints := []string{h.listener.Hint, served.URL}
+
+	inv, err := h.warden.Grant(h.being,
+		warden.Keys{Secret: secret("bothVoice"), HeirSecret: secret("bothVoiceHeir")},
+		h.warden.Padlock(), hints)
+	if err != nil {
+		t.Fatal(err)
+	}
+	guest := stand(t, "guest", 1<<20)
+	guest.Stand(guest.Self(), inv, inv.HeirSecret)
+
+	// A caller holding a door has sockets under it, so it takes the tcp:// hint
+	// the house offered first — never told to, never asked.
+	mine := secret("bothHeir")
+	speaking := &line.Caller{Door: door(guest, "guest")}
+	t.Cleanup(speaking.HangUp)
+	message, seq, err := guest.Ask(secret("askEphemeral"), warden.Reach{
+		Far:       h.warden.Name(),
+		NextHeir:  &mine,
+		Allowance: envelope.Allowance{Time: 5000, Hops: 8},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reply, err := speaking.Send(hints, message, &line.Expect{Warden: h.warden.Name(), Seq: seq})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply == nil {
+		t.Fatal("nothing came back")
+	}
+	if _, err := guest.Hear(guest.PadlockSecret(), reply); err != nil {
+		t.Fatal(err)
+	}
+	if len(h.listener.Lines()) != 1 {
+		t.Fatalf("the ask went down %d lines, want one", len(h.listener.Lines()))
+	}
+
+	// The same caller with no door cannot hold a line, so the tcp:// hint is a
+	// road it cannot speak. It walks past and posts, and no second connection
+	// was opened. The road was never the point: the seal is what proved it.
+	posting := &line.Caller{}
+	next := secret("bothHeirNext")
+	message, seq, err = guest.Ask(secret("askEphemeral2"), warden.Reach{
+		Far:       h.warden.Name(),
+		NextHeir:  &next,
+		Allowance: envelope.Allowance{Time: 5000, Hops: 8},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reply, err = posting.Send(hints, message, &line.Expect{Warden: h.warden.Name(), Seq: seq})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply == nil {
+		t.Fatal("the carriage carried nothing")
+	}
+	if _, err := guest.Hear(guest.PadlockSecret(), reply); err != nil {
+		t.Fatal(err)
+	}
+	if len(h.listener.Lines()) != 1 {
+		t.Fatalf("a caller with no door opened %d lines", len(h.listener.Lines()))
+	}
+}
+
+// TestARoadTheCallerCannotSpeakIsNotARoadThatFailed holds the difference
+// between the three nothings. Nothing was sent down a road this caller cannot
+// speak, so no door spoke and no road broke: it is neither silence nor weather,
+// and it is never the fault reported at the end.
+func TestARoadTheCallerCannotSpeakIsNotARoadThatFailed(t *testing.T) {
+	posting := &line.Caller{}
+
+	// One road it cannot speak and one that is weather: what comes back is the
+	// weather, never the skip.
+	if _, err := posting.Send([]string{"tcp://127.0.0.1:9", "http://127.0.0.1:1/"},
+		[]byte("hello"), nil); err == nil {
+		t.Fatal("a dead road carried")
+	}
+
+	// And a list of nothing but roads it cannot speak is no road tried at all,
+	// which is not weather either: there is no fault to report the road of.
+	reply, err := posting.Send([]string{"tcp://127.0.0.1:9"}, []byte("hello"), nil)
+	if err != nil {
+		t.Fatalf("skipping every road was reported as weather: %v", err)
+	}
+	if reply != nil {
+		t.Fatal("a road nobody spoke carried bytes")
 	}
 }

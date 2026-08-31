@@ -14,6 +14,7 @@ import (
 	"crypto/ed25519"
 	"crypto/hkdf"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 )
 
@@ -56,9 +57,54 @@ func Sign(secret [32]byte, message []byte) [SignatureSize]byte {
 	return sig
 }
 
+// smallOrder is the eight small-order points' encodings: the identity, the
+// point of order two, the two of order four — the all-zero key among them —
+// and the four of order eight. They are written out as constants so no kit
+// reimplements the arithmetic to comply.
+var smallOrder = [8][32]byte{
+	mustKey("0100000000000000000000000000000000000000000000000000000000000000"),
+	mustKey("ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+	mustKey("0000000000000000000000000000000000000000000000000000000000000000"),
+	mustKey("0000000000000000000000000000000000000000000000000000000000000080"),
+	mustKey("26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05"),
+	mustKey("c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a"),
+	mustKey("26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85"),
+	mustKey("c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa"),
+}
+
+// SmallOrder says whether a key is all zeros or of small order, which is the
+// one named refusal that stands in front of the platform's verifier.
+func SmallOrder(pk [32]byte) bool {
+	for _, point := range smallOrder {
+		if pk == point {
+			return true
+		}
+	}
+	return false
+}
+
 // Verify says whether the signature is that key's over those bytes.
+//
+// Verification is RFC 8032's check, and before it one named refusal: a public
+// key that is all zeros or of small order is silence, no signature examined.
+// A platform whose verifier is stricter than 8032 refuses more, which stays
+// legal; what the pre-check covers is the case where that difference could
+// make two kits disagree about a key that verifies anything.
 func Verify(pk [32]byte, message []byte, sig [SignatureSize]byte) bool {
+	if SmallOrder(pk) {
+		return false
+	}
 	return ed25519.Verify(ed25519.PublicKey(pk[:]), message, sig[:])
+}
+
+func mustKey(s string) [32]byte {
+	var k [32]byte
+	b, err := hex.DecodeString(s)
+	if err != nil || len(b) != 32 {
+		panic("arithmetic: a point that is not a key")
+	}
+	copy(k[:], b)
+	return k
 }
 
 // SealingKey is the padlock those thirty-two bytes mint. The bytes are the
@@ -75,6 +121,12 @@ func SealingKey(secret [32]byte) ([32]byte, error) {
 }
 
 // Agree is the X25519 shared secret between that private key and that padlock.
+//
+// An agreement that hands back thirty-two zero bytes is refused at the point of
+// agreement: the padlock was not a real key, and a seal derived from it would
+// protect nothing. Go's own ECDH is where that refusal happens — it returns an
+// error rather than the degenerate output — so this kit says it once and does
+// not say it twice.
 func Agree(secret, peer [32]byte) ([32]byte, error) {
 	var shared [32]byte
 	priv, err := ecdh.X25519().NewPrivateKey(secret[:])

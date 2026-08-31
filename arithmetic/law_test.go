@@ -3,6 +3,7 @@ package arithmetic_test
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/hex"
 	"testing"
 
 	"quo.systems/kit/arithmetic"
@@ -83,6 +84,80 @@ func TestASignatureIsSixtyFourBytesAndBindsBothKeyAndMessage(t *testing.T) {
 	turned[0] ^= 1
 	if arithmetic.Verify(pk, []byte("by whose authority"), turned) {
 		t.Fatal("a turned signature verified")
+	}
+}
+
+// TestASmallOrderKeyIsSilenceBeforeAnySignatureIsExamined holds the one named
+// refusal that stands in front of the platform's verifier. Whether Go's own
+// ed25519 would refuse these keys is not the point: what the law fixes is that
+// every kit refuses them at the same place, so no two kits disagree about a key
+// that verifies anything.
+func TestASmallOrderKeyIsSilenceBeforeAnySignatureIsExamined(t *testing.T) {
+	points := []string{
+		"0100000000000000000000000000000000000000000000000000000000000000",
+		"ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+		"0000000000000000000000000000000000000000000000000000000000000000",
+		"0000000000000000000000000000000000000000000000000000000000000080",
+		"26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+		"c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a",
+		"26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc85",
+		"c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac03fa",
+	}
+	if len(points) != 8 {
+		t.Fatal("the small-order points are eight")
+	}
+	sig := arithmetic.Sign(draw("voice"), []byte("by whose authority"))
+	for _, hexed := range points {
+		raw, err := hex.DecodeString(hexed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var pk [32]byte
+		copy(pk[:], raw)
+		if !arithmetic.SmallOrder(pk) {
+			t.Fatalf("%s was not named small-order", hexed)
+		}
+		if arithmetic.Verify(pk, []byte("by whose authority"), sig) {
+			t.Fatalf("%s verified something", hexed)
+		}
+		// And nothing it could ever be handed verifies either, signature and
+		// message alike.
+		if arithmetic.Verify(pk, nil, [arithmetic.SignatureSize]byte{}) {
+			t.Fatalf("%s verified an empty signature", hexed)
+		}
+	}
+	// An ordinary key is not caught by the pre-check, so what it refuses is the
+	// named set and nothing beside it.
+	if arithmetic.SmallOrder(arithmetic.SigningKey(draw("voice"))) {
+		t.Fatal("an ordinary voice was called small-order")
+	}
+}
+
+// TestADegenerateAgreementIsRefusedAtThePointOfAgreement holds Article VI's
+// other named refusal: an agreement that hands back thirty-two zero bytes is
+// refused where it happens, because the padlock was not a real key and a seal
+// derived from it would protect nothing. Go's own ECDH is where that refusal
+// lives — it errors rather than returning the degenerate output — so this kit
+// says it once and this case is what holds it said.
+func TestADegenerateAgreementIsRefusedAtThePointOfAgreement(t *testing.T) {
+	for _, hexed := range []string{
+		"0000000000000000000000000000000000000000000000000000000000000000",
+		"0100000000000000000000000000000000000000000000000000000000000000",
+		"ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f",
+	} {
+		raw, err := hex.DecodeString(hexed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var padlock [32]byte
+		copy(padlock[:], raw)
+		shared, err := arithmetic.Agree(draw("a"), padlock)
+		if err == nil {
+			t.Fatalf("%s agreed to %x", hexed, shared)
+		}
+		if shared != ([32]byte{}) {
+			t.Fatal("a refused agreement handed back a secret")
+		}
 	}
 }
 

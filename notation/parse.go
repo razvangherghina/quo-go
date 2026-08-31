@@ -255,6 +255,13 @@ func isIdentifier(s string) bool {
 // class block in order of first use, depth-first through the fields; a record
 // nothing uses is refused; and no record may reach itself.
 func (b *Blueprint) validate() error {
+	// A block wearing the name of a closed type would give one name two
+	// meanings, and the types are closed. It binds the class block as much as a
+	// record block.
+	if primitives[b.Name] != 0 {
+		return fmt.Errorf("notation: the class %q wears a closed type's name", b.Name)
+	}
+
 	declared := map[string]*Record{}
 	for i := range b.Records {
 		r := &b.Records[i]

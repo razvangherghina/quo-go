@@ -18,13 +18,19 @@ const DefaultWindow = 64
 // is able to know.
 type inbound struct {
 	voice      [32]byte
-	commitment [32]byte // the heir's, hashed under this door's name
-	beings     map[[32]byte]bool
-	mark       int64
-	spent      map[int64]bool // the numbers below the mark already honoured
-	padlock    *[32]byte      // how to answer this voice, refreshed by every call
-	hints      []string
-	label      string // a private label; it resolves nothing and travels nowhere
+	commitment [32]byte // the heir's, hashed under the name below
+	// name is the name this door wore when the commitment was minted. Every
+	// commitment was hashed with a door's name inside it, so a door that
+	// succeeded its name keeps verifying an older standing's heir at the name
+	// it was minted at, and mints new commitments under the new one. It is
+	// held in memory and rides nowhere.
+	name    [32]byte
+	beings  map[[32]byte]bool
+	mark    int64
+	spent   map[int64]bool // the numbers below the mark already honoured
+	padlock *[32]byte      // how to answer this voice, refreshed by every call
+	hints   []string
+	label   string // a private label; it resolves nothing and travels nowhere
 }
 
 // outbound is one row of the record of the relations this warden's beings may
@@ -55,6 +61,21 @@ type outbound struct {
 	// keep it could not believe that being's succession.
 	beings map[[32]byte][32]byte
 	label  string
+	// awaiting is the asks this ground has put on a road down this relation
+	// and has not yet heard an answer to. Article XII's fourth check on an
+	// answer is that one is awaiting under that padlock, that warden and that
+	// seq, so the caller keeps the record that check reads.
+	awaiting map[await]bool
+}
+
+// await is one ask still out: the number it spent and the padlock it told the
+// far door to seal the answer to. The warden is the row it hangs on. Two asks
+// carrying the same three are two asks whose answers cannot be told apart,
+// which is what a caller's own kit refuses to send — and a rotation, which
+// starts the far door's mark fresh, is how a number comes round again.
+type await struct {
+	seq     int64
+	padlock [32]byte
 }
 
 // record is the pair of records a warden keeps. They are not the same shape.
@@ -71,10 +92,13 @@ func newRecord(window int64) *record {
 // heir finds the standing whose committed heir this voice is. The commitment
 // binds the key and the place together, so a heir committed at another door
 // hashes to nothing here.
-func (r *record) heir(name, voice [32]byte) *inbound {
-	want := arithmetic.Commit(name, voice)
+//
+// Each row is hashed against the name its own commitment was minted under,
+// never the name the door wears now: after a name succession an older standing
+// must still be able to rotate.
+func (r *record) heir(voice [32]byte) *inbound {
 	for _, row := range r.in {
-		if row.commitment == want {
+		if arithmetic.Commit(row.name, voice) == row.commitment {
 			return row
 		}
 	}
@@ -84,10 +108,12 @@ func (r *record) heir(name, voice [32]byte) *inbound {
 // rotate hands a standing over: the pk becomes the current holder, the carried
 // commitment becomes the new heir, the old key dies, and the mark starts
 // fresh, because the new holder never saw the numbers the old one counted.
-func (r *record) rotate(row *inbound, voice, commitment [32]byte) {
+func (r *record) rotate(row *inbound, voice, commitment, name [32]byte) {
 	delete(r.in, row.voice)
 	row.voice = voice
 	row.commitment = commitment
+	// New commitments are minted under the name the door has now.
+	row.name = name
 	row.mark = 0
 	row.spent = map[int64]bool{}
 	r.in[voice] = row
@@ -115,6 +141,14 @@ func spend(mark *int64, spent map[int64]bool, window, seq int64) error {
 	}
 	spent[seq] = true
 	if seq > *mark {
+		// The number the mark held is honoured — that is what a mark is — and
+		// must stay honoured as the mark moves off it. Ordinarily it is in the
+		// set already, because it was spent through here; a mark that arrived
+		// in a cargo never was, and a mark that simply moved would leave that
+		// number free to be honoured a second time.
+		if was := *mark; was >= 1 {
+			spent[was] = true
+		}
 		*mark = seq
 		forget(spent, *mark, window)
 	}

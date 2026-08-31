@@ -75,6 +75,22 @@
       "refuses": true
     },
     {
+      "name": "a signature under an all-zero public key is silence",
+      "law": "The arithmetic",
+      "voice": "0000000000000000000000000000000000000000000000000000000000000000",
+      "message": "62792077686f736520617574686f72697479",
+      "signature": "60aa62f7129c8fdeba710872fa10016dae1aa12df0f31969a6baabf60b2ebc3d0822cc9a8b1eb12246076b2eea69d381a03c2f581c05ba6bcca3b4ba80c2f504",
+      "refuses": true
+    },
+    {
+      "name": "a signature under a small-order public key is silence",
+      "law": "The arithmetic",
+      "voice": "26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05",
+      "message": "62792077686f736520617574686f72697479",
+      "signature": "60aa62f7129c8fdeba710872fa10016dae1aa12df0f31969a6baabf60b2ebc3d0822cc9a8b1eb12246076b2eea69d381a03c2f581c05ba6bcca3b4ba80c2f504",
+      "refuses": true
+    },
+    {
       "name": "an X25519 agreement",
       "law": "The arithmetic",
       "secret": "fcfabee71b7a33993cca5579e6a273ffd1c62cc1749cbf1c9049f599e44f6477",
