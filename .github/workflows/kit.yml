@@ -1,0 +1,33 @@
+# The kit, on every push. This repository ships a bench beside every package
+# and says so in its README; a bench nobody runs in public is a claim rather
+# than a proof.
+name: kit
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The floor the module declares, and whatever is current. A matrix that
+        # skips the floor is a claim nobody is checking.
+        go: ['1.24', 'stable']
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ matrix.go }}
+          # Zero dependencies: there is no go.sum, so there is nothing to cache
+          # and the action should not go looking.
+          cache: false
+      - run: go build ./...
+      - run: go test -count=1 ./...

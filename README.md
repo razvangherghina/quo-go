@@ -7,6 +7,8 @@ one question — _by whose authority?_ — and refuses every other.
 go get quo.systems/kit
 ```
 
+Go 1.24 or newer — the module declares that floor and its bench is run on it.
+
 The import path is `quo.systems/kit` and it always will be. It names the
 protocol rather than a host, an account or a company, because no vendor owns
 Quo and the line every builder pastes into their file should say so.
@@ -24,6 +26,7 @@ and the repository root are the same thing.
 - `envelope` — the sealed letter, and the two faces of it.
 - `wire` — the bytes on the socket.
 - `carriage` — carrying a letter from one house to another.
+- `line` — the second road: framed envelopes over one persistent connection.
 - `warden` — the door: who is admitted, on whose standing, and for what.
 - `cmd/subject` — a small executable that speaks the protocol for you.
 
