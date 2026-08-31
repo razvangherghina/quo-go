@@ -1,0 +1,218 @@
+{
+  "corpus": "quo",
+  "law": "https://github.com/razvangherghina/quo/blob/main/constitution.md",
+  "encoding": "hex",
+  "area": "notation",
+  "vectors": [
+    {
+      "name": "the blueprint the notation section writes",
+      "law": "The notation",
+      "blueprint": "ToDo\n  add(title text) item\n  complete(id text) bool\n  items() [item]\n  members() [being]\n\nitem\n  id text\n  title text\n  done bool\n",
+      "canonical": "546f446f0a2020616464287469746c65207465787429206974656d0a2020636f6d706c65746528696420746578742920626f6f6c0a20206974656d732829205b6974656d5d0a20206d656d626572732829205b6265696e675d0a0a6974656d0a2020696420746578740a20207469746c6520746578740a2020646f6e6520626f6f6c0a",
+      "digest": "44c9b17ff1a0ede4fc5a2ce62b932a0b7c3353e1c146078fa7767cde94df79e7"
+    },
+    {
+      "name": "a class whose one field answers a bool",
+      "law": "The notation",
+      "blueprint": "Small\n  yes() bool\n",
+      "canonical": "536d616c6c0a2020796573282920626f6f6c0a",
+      "digest": "6f196e50c9d0eb0313160110773585c1e41bfb47142f16904be0ccfd6ace7498"
+    },
+    {
+      "name": "a field that answers nothing",
+      "law": "The notation",
+      "blueprint": "Quiet\n  tell(word text)\n",
+      "canonical": "51756965740a202074656c6c28776f72642074657874290a",
+      "digest": "d7e5fecad0978306f26545de91c575672b202fe7b6cfdff3b373a32cea864bb3"
+    },
+    {
+      "name": "every closed type and both combinators",
+      "law": "The notation",
+      "blueprint": "Closed\n  yes() bool\n  count() int\n  label() text\n  blob() bytes\n  hash() b32\n  who() being\n  way() invitation\n  door() card\n  many() [text]\n  maybe() int?\n  nested() [[bool]]\n  both() [text?]\n  listMaybe() [int]?\n  quiet(one text, two int)\n",
+      "canonical": "436c6f7365640a2020796573282920626f6f6c0a2020636f756e74282920696e740a20206c6162656c282920746578740a2020626c6f6228292062797465730a2020686173682829206233320a202077686f2829206265696e670a2020776179282920696e7669746174696f6e0a2020646f6f72282920636172640a20206d616e792829205b746578745d0a20206d61796265282920696e743f0a20206e65737465642829205b5b626f6f6c5d5d0a2020626f74682829205b746578743f5d0a20206c6973744d617962652829205b696e745d3f0a20207175696574286f6e6520746578742c2074776f20696e74290a",
+      "digest": "1119842eb15204dc4528058b57ac3825d10b0c14c848baabad5f11477e813c22"
+    },
+    {
+      "name": "record blocks in order of first use, depth-first",
+      "law": "The notation",
+      "blueprint": "Order\n  first() outer\n  second() other\n\nouter\n  inner inner\n\ninner\n  count int\n\nother\n  flag bool\n",
+      "canonical": "4f726465720a202066697273742829206f757465720a20207365636f6e642829206f746865720a0a6f757465720a2020696e6e657220696e6e65720a0a696e6e65720a2020636f756e7420696e740a0a6f746865720a2020666c616720626f6f6c0a",
+      "digest": "a3b9d5c2d44ee4abf9d89199c22c03ed0ccbd29aba24cb0ba3ba5c12e916a2d7"
+    },
+    {
+      "name": "the blueprint every warden holds",
+      "law": "The notation",
+      "blueprint": "Warden\n  describe() estate\n  sketch(being being) sketch?\n  blueprint(digest b32) text?\n  limit() int\n  tell(word word)\n  moved(being being) word?\n  receive(cargo cargo) b32\n\nestate\n  classes [class]\n\nclass\n  digest b32\n  beings [held]\n\nheld\n  being being\n  commitment b32\n\nsketch\n  being being\n  digest b32\n  commitment b32\n\nword\n  being being?\n  successor b32?\n  commitment b32?\n  name b32?\n  padlock b32?\n  hints [text]\n\ncargo\n  being being\n  digest b32\n  cells bytes\n  standings [standing]\n  relations [relation]\n\nstanding\n  voice b32\n  commitment b32\n  beings [being]\n  mark int\n  spent [int]\n  padlock b32?\n  hints [text]\n\nrelation\n  warden being\n  commitment b32\n  padlock b32\n  voice b32\n  secret b32\n  heir b32\n  heirSecret b32\n  seq int\n  hints [text]\n",
+      "canonical": "57617264656e0a202064657363726962652829206573746174650a2020736b65746368286265696e67206265696e672920736b657463683f0a2020626c75657072696e7428646967657374206233322920746578743f0a20206c696d6974282920696e740a202074656c6c28776f726420776f7264290a20206d6f766564286265696e67206265696e672920776f72643f0a20207265636569766528636172676f20636172676f29206233320a0a6573746174650a2020636c6173736573205b636c6173735d0a0a636c6173730a2020646967657374206233320a20206265696e6773205b68656c645d0a0a68656c640a20206265696e67206265696e670a2020636f6d6d69746d656e74206233320a0a736b657463680a20206265696e67206265696e670a2020646967657374206233320a2020636f6d6d69746d656e74206233320a0a776f72640a20206265696e67206265696e673f0a2020737563636573736f72206233323f0a2020636f6d6d69746d656e74206233323f0a20206e616d65206233323f0a20207061646c6f636b206233323f0a202068696e7473205b746578745d0a0a636172676f0a20206265696e67206265696e670a2020646967657374206233320a202063656c6c732062797465730a20207374616e64696e6773205b7374616e64696e675d0a202072656c6174696f6e73205b72656c6174696f6e5d0a0a7374616e64696e670a2020766f696365206233320a2020636f6d6d69746d656e74206233320a20206265696e6773205b6265696e675d0a20206d61726b20696e740a20207370656e74205b696e745d0a20207061646c6f636b206233323f0a202068696e7473205b746578745d0a0a72656c6174696f6e0a202077617264656e206265696e670a2020636f6d6d69746d656e74206233320a20207061646c6f636b206233320a2020766f696365206233320a2020736563726574206233320a202068656972206233320a202068656972536563726574206233320a202073657120696e740a202068696e7473205b746578745d0a",
+      "digest": "a610bb96a3edc51e45475c7fe8b7d4880b1869bde184e9383545d5441793aa6b"
+    },
+    {
+      "name": "a record block out of the derived order",
+      "law": "The notation",
+      "blueprint": "Order\n  first() a\n  second() b\n\nb\n  x int\n\na\n  y int\n",
+      "refuses": true
+    },
+    {
+      "name": "a record nothing uses",
+      "law": "The notation",
+      "blueprint": "Order\n  first() bool\n\nspare\n  x int\n",
+      "refuses": true
+    },
+    {
+      "name": "a record that reaches itself",
+      "law": "The notation",
+      "blueprint": "Order\n  first() a\n\na\n  self a\n",
+      "refuses": true
+    },
+    {
+      "name": "a record that reaches itself through another",
+      "law": "The notation",
+      "blueprint": "Order\n  first() a\n\na\n  b b\n\nb\n  a a\n",
+      "refuses": true
+    },
+    {
+      "name": "a type no block declares",
+      "law": "The notation",
+      "blueprint": "Order\n  first() nothere\n",
+      "refuses": true
+    },
+    {
+      "name": "an empty class block",
+      "law": "The notation",
+      "blueprint": "Order\n",
+      "refuses": true
+    },
+    {
+      "name": "an empty record block",
+      "law": "The notation",
+      "blueprint": "Order\n  first() a\n\na\n",
+      "refuses": true
+    },
+    {
+      "name": "a byte order mark",
+      "law": "The notation",
+      "blueprint": "﻿Small\n  yes() bool\n",
+      "refuses": true
+    },
+    {
+      "name": "a carriage return",
+      "law": "The notation",
+      "blueprint": "Small\r\n  yes() bool\r\n",
+      "refuses": true
+    },
+    {
+      "name": "a tab in place of the indent",
+      "law": "The notation",
+      "blueprint": "Small\n\tyes() bool\n",
+      "refuses": true
+    },
+    {
+      "name": "no final newline",
+      "law": "The notation",
+      "blueprint": "Small\n  yes() bool",
+      "refuses": true
+    },
+    {
+      "name": "a trailing space",
+      "law": "The notation",
+      "blueprint": "Small\n  yes() bool \n",
+      "refuses": true
+    },
+    {
+      "name": "a comment",
+      "law": "The notation",
+      "blueprint": "Small\n  # nothing\n  yes() bool\n",
+      "refuses": true
+    },
+    {
+      "name": "two blank lines between blocks",
+      "law": "The notation",
+      "blueprint": "Order\n  first() a\n\n\na\n  x int\n",
+      "refuses": true
+    },
+    {
+      "name": "a trailing blank line",
+      "law": "The notation",
+      "blueprint": "Small\n  yes() bool\n\n",
+      "refuses": true
+    },
+    {
+      "name": "four spaces of indent",
+      "law": "The notation",
+      "blueprint": "Small\n    yes() bool\n",
+      "refuses": true
+    },
+    {
+      "name": "three spaces of indent",
+      "law": "The notation",
+      "blueprint": "Small\n   yes() bool\n",
+      "refuses": true
+    },
+    {
+      "name": "a class field written without parentheses",
+      "law": "The notation",
+      "blueprint": "Small\n  yes bool\n",
+      "refuses": true
+    },
+    {
+      "name": "a record field written with parentheses",
+      "law": "The notation",
+      "blueprint": "Order\n  first() a\n\na\n  x() int\n",
+      "refuses": true
+    },
+    {
+      "name": "two arguments separated by a comma alone",
+      "law": "The notation",
+      "blueprint": "Small\n  pair(one text,two int) bool\n",
+      "refuses": true
+    },
+    {
+      "name": "two arguments separated by a space alone",
+      "law": "The notation",
+      "blueprint": "Small\n  pair(one text two int) bool\n",
+      "refuses": true
+    },
+    {
+      "name": "an identifier that is not ASCII",
+      "law": "The notation",
+      "blueprint": "Småll\n  yes() bool\n",
+      "refuses": true
+    },
+    {
+      "name": "an identifier that starts with a digit",
+      "law": "The notation",
+      "blueprint": "1Small\n  yes() bool\n",
+      "refuses": true
+    },
+    {
+      "name": "an identifier that carries an underscore",
+      "law": "The notation",
+      "blueprint": "Small\n  is_yes() bool\n",
+      "refuses": true
+    },
+    {
+      "name": "two spaces between tokens",
+      "law": "The notation",
+      "blueprint": "Small\n  yes()  bool\n",
+      "refuses": true
+    },
+    {
+      "name": "a field named twice in one class",
+      "law": "The notation",
+      "blueprint": "Small\n  yes() bool\n  yes() int\n",
+      "refuses": true
+    },
+    {
+      "name": "a field named twice in one record",
+      "law": "The notation",
+      "blueprint": "Order\n  first() a\n\na\n  x int\n  x bool\n",
+      "refuses": true
+    },
+    {
+      "name": "the class block used as a type",
+      "law": "The notation",
+      "blueprint": "Small\n  first() Small\n",
+      "refuses": true
+    }
+  ]
+}

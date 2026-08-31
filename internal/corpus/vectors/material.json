@@ -1,0 +1,28 @@
+{
+  "corpus": "quo",
+  "law": "https://github.com/razvangherghina/quo/blob/main/constitution.md",
+  "encoding": "hex",
+  "area": "material",
+  "material": {
+    "wardenName": "eb8478a4581b4db71bb278c675047a66577e0d762cc18ebc5220543708d0df5b",
+    "wardenNameSecret": "196982eee79e80efbc3131c93b99285a38c540c43e7e4fbb8399c260b1ce5103",
+    "wardenHeir": "c0a3e67daa78b60371f8c06c8d775c9dc8d8795a995c985f0c561810cd095dee",
+    "wardenCommitment": "23094711779588b0aced9d327714251901a101b8f2a5765d91fecc983d1fd636",
+    "being": "1d5eda50d19066d0cc460cfb584ee026f532da67ff66c0e9774940a11e25ec71",
+    "beingCommitment": "106f68d5ce972aac763bd59463d8d1abf64d38e2e642db8441d5e0e2bb18cbde",
+    "voice": "be6615086e715c9cea8856a892c7e363cc2401b5edccadb49b347a8bee22c6e2",
+    "voiceSecret": "2ebd74bd564a8771fa628b28308c588588f5c0d0db17ae06b045b896d8218ad7",
+    "voiceHeir": "afa0ce0919a81bf57861ac7139d8945a1fc2ba9f00e53a4f26f494c23f78338c",
+    "voiceHeirSecret": "7bae8096dc92d5f4e271742fd8db51abd563a8976c223dd734f1d2bdd553093c",
+    "voiceHeirCommitment": "290d6caefb277537554cc8f48597206e9b5ca2975dc81dc4c8f66662570b4d64",
+    "nextHeirCommitment": "db264a809a1bd49a758fefaf59daa530e0235049dd311fd745f9ecd32674ff79",
+    "padlock": "bb0109e1147cb2b716f9407f947b0c47a8c3c18ce00339dc02df47c54fd1e202",
+    "padlockSecret": "7dbcdb3088339c02378f46525bff3fe2b84515973e28f5814301a99f386e20b1",
+    "returnPadlock": "5a13b7a05e31ae998ad1307217981bb23bb17d277465829edd616e9169c8f46e",
+    "returnPadlockSecret": "73c735d14464c99c8412ccff9c0e59cf59fe42b7e925affff2590b8328e46fba",
+    "ephemeralSecret": "fcfabee71b7a33993cca5579e6a273ffd1c62cc1749cbf1c9049f599e44f6477",
+    "ephemeral": "17ff733c9cffec197551af9aaf710b7b07a4d7aeffc9894d6e89b10df3d2d011",
+    "successor": "efc15f8742c6c2755887d9e83884dd30b69d25548ef299cdd296053be9c0df99",
+    "successorSecret": "ae10558bf4baf5c7a0b00c559d8e9fef60255c751bc0c2fe17f2e7c304b09d60"
+  }
+}

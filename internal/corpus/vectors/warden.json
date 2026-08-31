@@ -1,0 +1,107 @@
+{
+  "corpus": "quo",
+  "law": "https://github.com/razvangherghina/quo/blob/main/constitution.md",
+  "encoding": "hex",
+  "area": "warden",
+  "vectors": [
+    {
+      "name": "the blueprint every warden holds, and its digest",
+      "law": "The warden is a being, and here is its blueprint",
+      "blueprint": "Warden\n  describe() estate\n  sketch(being being) sketch?\n  blueprint(digest b32) text?\n  limit() int\n  tell(word word)\n  moved(being being) word?\n  receive(cargo cargo) b32\n\nestate\n  classes [class]\n\nclass\n  digest b32\n  beings [held]\n\nheld\n  being being\n  commitment b32\n\nsketch\n  being being\n  digest b32\n  commitment b32\n\nword\n  being being?\n  successor b32?\n  commitment b32?\n  name b32?\n  padlock b32?\n  hints [text]\n\ncargo\n  being being\n  digest b32\n  cells bytes\n  standings [standing]\n  relations [relation]\n\nstanding\n  voice b32\n  commitment b32\n  beings [being]\n  mark int\n  spent [int]\n  padlock b32?\n  hints [text]\n\nrelation\n  warden being\n  commitment b32\n  padlock b32\n  voice b32\n  secret b32\n  heir b32\n  heirSecret b32\n  seq int\n  hints [text]\n",
+      "canonical": "57617264656e0a202064657363726962652829206573746174650a2020736b65746368286265696e67206265696e672920736b657463683f0a2020626c75657072696e7428646967657374206233322920746578743f0a20206c696d6974282920696e740a202074656c6c28776f726420776f7264290a20206d6f766564286265696e67206265696e672920776f72643f0a20207265636569766528636172676f20636172676f29206233320a0a6573746174650a2020636c6173736573205b636c6173735d0a0a636c6173730a2020646967657374206233320a20206265696e6773205b68656c645d0a0a68656c640a20206265696e67206265696e670a2020636f6d6d69746d656e74206233320a0a736b657463680a20206265696e67206265696e670a2020646967657374206233320a2020636f6d6d69746d656e74206233320a0a776f72640a20206265696e67206265696e673f0a2020737563636573736f72206233323f0a2020636f6d6d69746d656e74206233323f0a20206e616d65206233323f0a20207061646c6f636b206233323f0a202068696e7473205b746578745d0a0a636172676f0a20206265696e67206265696e670a2020646967657374206233320a202063656c6c732062797465730a20207374616e64696e6773205b7374616e64696e675d0a202072656c6174696f6e73205b72656c6174696f6e5d0a0a7374616e64696e670a2020766f696365206233320a2020636f6d6d69746d656e74206233320a20206265696e6773205b6265696e675d0a20206d61726b20696e740a20207370656e74205b696e745d0a20207061646c6f636b206233323f0a202068696e7473205b746578745d0a0a72656c6174696f6e0a202077617264656e206265696e670a2020636f6d6d69746d656e74206233320a20207061646c6f636b206233320a2020766f696365206233320a2020736563726574206233320a202068656972206233320a202068656972536563726574206233320a202073657120696e740a202068696e7473205b746578745d0a",
+      "digest": "a610bb96a3edc51e45475c7fe8b7d4880b1869bde184e9383545d5441793aa6b"
+    },
+    {
+      "name": "an estate ordered by digest bytes ascending, pks ascending under each",
+      "law": "The describe",
+      "blueprint": "Probe\n  probe() estate\n\nestate\n  classes [class]\n\nclass\n  digest b32\n  beings [held]\n\nheld\n  being being\n  commitment b32\n",
+      "unordered": {
+        "classes": [
+          {
+            "digest": "44c9b17ff1a0ede4fc5a2ce62b932a0b7c3353e1c146078fa7767cde94df79e7",
+            "beings": [
+              {
+                "being": "be6615086e715c9cea8856a892c7e363cc2401b5edccadb49b347a8bee22c6e2",
+                "commitment": "c257352c5786d89956328317c91081ff8f41e61bb9036ffd39e9ce771321bc15"
+              },
+              {
+                "being": "efc15f8742c6c2755887d9e83884dd30b69d25548ef299cdd296053be9c0df99",
+                "commitment": "1fc52d47869e530c276a15bc7b6de9941655f8a60275715e95063eed952f19ef"
+              },
+              {
+                "being": "1d5eda50d19066d0cc460cfb584ee026f532da67ff66c0e9774940a11e25ec71",
+                "commitment": "05c818cb1359ebe316bf42ead0831f3d310f64b249e0b230f777df6264532f44"
+              }
+            ]
+          },
+          {
+            "digest": "1119842eb15204dc4528058b57ac3825d10b0c14c848baabad5f11477e813c22",
+            "beings": [
+              {
+                "being": "efc15f8742c6c2755887d9e83884dd30b69d25548ef299cdd296053be9c0df99",
+                "commitment": "1fc52d47869e530c276a15bc7b6de9941655f8a60275715e95063eed952f19ef"
+              },
+              {
+                "being": "1d5eda50d19066d0cc460cfb584ee026f532da67ff66c0e9774940a11e25ec71",
+                "commitment": "05c818cb1359ebe316bf42ead0831f3d310f64b249e0b230f777df6264532f44"
+              }
+            ]
+          },
+          {
+            "digest": "a610bb96a3edc51e45475c7fe8b7d4880b1869bde184e9383545d5441793aa6b",
+            "beings": [
+              {
+                "being": "1d5eda50d19066d0cc460cfb584ee026f532da67ff66c0e9774940a11e25ec71",
+                "commitment": "05c818cb1359ebe316bf42ead0831f3d310f64b249e0b230f777df6264532f44"
+              }
+            ]
+          }
+        ]
+      },
+      "value": {
+        "classes": [
+          {
+            "digest": "1119842eb15204dc4528058b57ac3825d10b0c14c848baabad5f11477e813c22",
+            "beings": [
+              {
+                "being": "1d5eda50d19066d0cc460cfb584ee026f532da67ff66c0e9774940a11e25ec71",
+                "commitment": "05c818cb1359ebe316bf42ead0831f3d310f64b249e0b230f777df6264532f44"
+              },
+              {
+                "being": "efc15f8742c6c2755887d9e83884dd30b69d25548ef299cdd296053be9c0df99",
+                "commitment": "1fc52d47869e530c276a15bc7b6de9941655f8a60275715e95063eed952f19ef"
+              }
+            ]
+          },
+          {
+            "digest": "44c9b17ff1a0ede4fc5a2ce62b932a0b7c3353e1c146078fa7767cde94df79e7",
+            "beings": [
+              {
+                "being": "1d5eda50d19066d0cc460cfb584ee026f532da67ff66c0e9774940a11e25ec71",
+                "commitment": "05c818cb1359ebe316bf42ead0831f3d310f64b249e0b230f777df6264532f44"
+              },
+              {
+                "being": "be6615086e715c9cea8856a892c7e363cc2401b5edccadb49b347a8bee22c6e2",
+                "commitment": "c257352c5786d89956328317c91081ff8f41e61bb9036ffd39e9ce771321bc15"
+              },
+              {
+                "being": "efc15f8742c6c2755887d9e83884dd30b69d25548ef299cdd296053be9c0df99",
+                "commitment": "1fc52d47869e530c276a15bc7b6de9941655f8a60275715e95063eed952f19ef"
+              }
+            ]
+          },
+          {
+            "digest": "a610bb96a3edc51e45475c7fe8b7d4880b1869bde184e9383545d5441793aa6b",
+            "beings": [
+              {
+                "being": "1d5eda50d19066d0cc460cfb584ee026f532da67ff66c0e9774940a11e25ec71",
+                "commitment": "05c818cb1359ebe316bf42ead0831f3d310f64b249e0b230f777df6264532f44"
+              }
+            ]
+          }
+        ]
+      },
+      "bytes": "00000000000000031119842eb15204dc4528058b57ac3825d10b0c14c848baabad5f11477e813c2200000000000000021d5eda50d19066d0cc460cfb584ee026f532da67ff66c0e9774940a11e25ec7105c818cb1359ebe316bf42ead0831f3d310f64b249e0b230f777df6264532f44efc15f8742c6c2755887d9e83884dd30b69d25548ef299cdd296053be9c0df991fc52d47869e530c276a15bc7b6de9941655f8a60275715e95063eed952f19ef44c9b17ff1a0ede4fc5a2ce62b932a0b7c3353e1c146078fa7767cde94df79e700000000000000031d5eda50d19066d0cc460cfb584ee026f532da67ff66c0e9774940a11e25ec7105c818cb1359ebe316bf42ead0831f3d310f64b249e0b230f777df6264532f44be6615086e715c9cea8856a892c7e363cc2401b5edccadb49b347a8bee22c6e2c257352c5786d89956328317c91081ff8f41e61bb9036ffd39e9ce771321bc15efc15f8742c6c2755887d9e83884dd30b69d25548ef299cdd296053be9c0df991fc52d47869e530c276a15bc7b6de9941655f8a60275715e95063eed952f19efa610bb96a3edc51e45475c7fe8b7d4880b1869bde184e9383545d5441793aa6b00000000000000011d5eda50d19066d0cc460cfb584ee026f532da67ff66c0e9774940a11e25ec7105c818cb1359ebe316bf42ead0831f3d310f64b249e0b230f777df6264532f44"
+    }
+  ]
+}

@@ -1,0 +1,125 @@
+{
+  "corpus": "quo",
+  "law": "https://github.com/razvangherghina/quo/blob/main/constitution.md",
+  "encoding": "hex",
+  "area": "arithmetic",
+  "vectors": [
+    {
+      "name": "SHA-256 of nothing",
+      "law": "The arithmetic",
+      "input": "",
+      "hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "SHA-256 of three bytes",
+      "law": "The arithmetic",
+      "input": "616263",
+      "hash": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    },
+    {
+      "name": "the heir commitment is the warden pk then the heir pk, hashed",
+      "law": "The arithmetic",
+      "warden": "eb8478a4581b4db71bb278c675047a66577e0d762cc18ebc5220543708d0df5b",
+      "heir": "afa0ce0919a81bf57861ac7139d8945a1fc2ba9f00e53a4f26f494c23f78338c",
+      "commitment": "290d6caefb277537554cc8f48597206e9b5ca2975dc81dc4c8f66662570b4d64"
+    },
+    {
+      "name": "a warden's own commitment hashes its name under itself",
+      "law": "The arithmetic",
+      "warden": "eb8478a4581b4db71bb278c675047a66577e0d762cc18ebc5220543708d0df5b",
+      "heir": "c0a3e67daa78b60371f8c06c8d775c9dc8d8795a995c985f0c561810cd095dee",
+      "commitment": "23094711779588b0aced9d327714251901a101b8f2a5765d91fecc983d1fd636"
+    },
+    {
+      "name": "an Ed25519 pair from a fixed secret",
+      "law": "The arithmetic",
+      "secret": "2ebd74bd564a8771fa628b28308c588588f5c0d0db17ae06b045b896d8218ad7",
+      "pk": "be6615086e715c9cea8856a892c7e363cc2401b5edccadb49b347a8bee22c6e2"
+    },
+    {
+      "name": "an X25519 pair from a fixed secret",
+      "law": "The arithmetic",
+      "secret": "7dbcdb3088339c02378f46525bff3fe2b84515973e28f5814301a99f386e20b1",
+      "pk": "bb0109e1147cb2b716f9407f947b0c47a8c3c18ce00339dc02df47c54fd1e202"
+    },
+    {
+      "name": "a signature over nothing",
+      "law": "The arithmetic",
+      "secret": "2ebd74bd564a8771fa628b28308c588588f5c0d0db17ae06b045b896d8218ad7",
+      "voice": "be6615086e715c9cea8856a892c7e363cc2401b5edccadb49b347a8bee22c6e2",
+      "message": "",
+      "signature": "6e5517c3c92afd95e6956d974a2c39045677472c8736cf13f7e400dd9d843d7d161334c55166383bd2f33eea2312953778ecf7180a70868c4802350f1a896006"
+    },
+    {
+      "name": "a signature over a message",
+      "law": "The arithmetic",
+      "secret": "2ebd74bd564a8771fa628b28308c588588f5c0d0db17ae06b045b896d8218ad7",
+      "voice": "be6615086e715c9cea8856a892c7e363cc2401b5edccadb49b347a8bee22c6e2",
+      "message": "62792077686f736520617574686f72697479",
+      "signature": "60aa62f7129c8fdeba710872fa10016dae1aa12df0f31969a6baabf60b2ebc3d0822cc9a8b1eb12246076b2eea69d381a03c2f581c05ba6bcca3b4ba80c2f504"
+    },
+    {
+      "name": "a signature under the wrong voice does not verify",
+      "law": "The arithmetic",
+      "voice": "efc15f8742c6c2755887d9e83884dd30b69d25548ef299cdd296053be9c0df99",
+      "message": "62792077686f736520617574686f72697479",
+      "signature": "60aa62f7129c8fdeba710872fa10016dae1aa12df0f31969a6baabf60b2ebc3d0822cc9a8b1eb12246076b2eea69d381a03c2f581c05ba6bcca3b4ba80c2f504",
+      "refuses": true
+    },
+    {
+      "name": "a signature over other bytes does not verify",
+      "law": "The arithmetic",
+      "voice": "be6615086e715c9cea8856a892c7e363cc2401b5edccadb49b347a8bee22c6e2",
+      "message": "62792077686f736520617574686f7269747920",
+      "signature": "60aa62f7129c8fdeba710872fa10016dae1aa12df0f31969a6baabf60b2ebc3d0822cc9a8b1eb12246076b2eea69d381a03c2f581c05ba6bcca3b4ba80c2f504",
+      "refuses": true
+    },
+    {
+      "name": "an X25519 agreement",
+      "law": "The arithmetic",
+      "secret": "fcfabee71b7a33993cca5579e6a273ffd1c62cc1749cbf1c9049f599e44f6477",
+      "pk": "bb0109e1147cb2b716f9407f947b0c47a8c3c18ce00339dc02df47c54fd1e202",
+      "shared": "3d33d3f6044552ecd30503ba772b3d4f69544da0b3a4a46bfa63b056bb191833"
+    },
+    {
+      "name": "the agreement is the same from either side",
+      "law": "The arithmetic",
+      "secret": "7dbcdb3088339c02378f46525bff3fe2b84515973e28f5814301a99f386e20b1",
+      "pk": "17ff733c9cffec197551af9aaf710b7b07a4d7aeffc9894d6e89b10df3d2d011",
+      "shared": "3d33d3f6044552ecd30503ba772b3d4f69544da0b3a4a46bfa63b056bb191833"
+    },
+    {
+      "name": "forty-four bytes drawn under the fixed info, key then nonce",
+      "law": "The arithmetic",
+      "info": "71756f2d7365616c",
+      "salt": "",
+      "shared": "3d33d3f6044552ecd30503ba772b3d4f69544da0b3a4a46bfa63b056bb191833",
+      "key": "c55777b57b5a972030441a03e03f9ed5bfcaadcccb1511c853afcc2547a451f5",
+      "nonce": "b3a7c637499e0d3ee8606dc2"
+    },
+    {
+      "name": "AES-256-GCM with the ephemeral pk as the additional data",
+      "law": "The arithmetic",
+      "shared": "3d33d3f6044552ecd30503ba772b3d4f69544da0b3a4a46bfa63b056bb191833",
+      "additional": "17ff733c9cffec197551af9aaf710b7b07a4d7aeffc9894d6e89b10df3d2d011",
+      "plaintext": "62792077686f736520617574686f72697479",
+      "ciphertext": "94eaa19e94fa885635d4a863c94240629cce6573a9109c0c445cade99fea551ff366"
+    },
+    {
+      "name": "a ciphertext with one byte turned does not open",
+      "law": "The arithmetic",
+      "shared": "3d33d3f6044552ecd30503ba772b3d4f69544da0b3a4a46bfa63b056bb191833",
+      "additional": "17ff733c9cffec197551af9aaf710b7b07a4d7aeffc9894d6e89b10df3d2d011",
+      "ciphertext": "95eaa19e94fa885635d4a863c94240629cce6573a9109c0c445cade99fea551ff366",
+      "refuses": true
+    },
+    {
+      "name": "a ciphertext under other additional data does not open",
+      "law": "The arithmetic",
+      "shared": "3d33d3f6044552ecd30503ba772b3d4f69544da0b3a4a46bfa63b056bb191833",
+      "additional": "bb0109e1147cb2b716f9407f947b0c47a8c3c18ce00339dc02df47c54fd1e202",
+      "ciphertext": "94eaa19e94fa885635d4a863c94240629cce6573a9109c0c445cade99fea551ff366",
+      "refuses": true
+    }
+  ]
+}
