@@ -134,13 +134,33 @@ type Draws struct {
 	Heir      [32]byte
 }
 
+// Maker makes a being of one class from the cells that arrived with it. It is
+// the host's program, so it is the host that writes it: the door mints the
+// keys and keeps the records, and never invents an object.
+//
+// An error is the destination refusing the cargo, which reaches the origin as
+// the silence every other refusal does.
+type Maker func(cells []byte) (Being, error)
+
+// class is a blueprint this house can make a being of: what makes one, and the
+// field names that blueprint declares, read once at registration rather than
+// on every arrival.
+type class struct {
+	make     Maker
+	declares map[string]bool
+}
+
 type held struct {
 	pk         [32]byte
 	secret     [32]byte
 	digest     [32]byte
 	commitment [32]byte
-	object     Being
-	moved      *Word // the succession this door published, answered by `moved` alone
+	// heir is the pk this being's commitment is of — the name it takes on the
+	// first of a migration's two rotations, and so the name a cargo is packed
+	// under. The secret stays the host's: a departure is handed the heir's key
+	// and this door only ever checks it against the commitment.
+	heir   [32]byte
+	object Being
 	// declares is the blueprint's field names. The blueprint is the scope: a
 	// name it never declared is never reached for on the object at all, so the
 	// door refuses it before the object is touched.
@@ -214,7 +234,24 @@ type Warden struct {
 
 	beings     map[[32]byte]*held
 	blueprints map[[32]byte]string
-	record     *record
+	// classes are the blueprints this house can make a being of, by digest.
+	// Holding a class's text is not holding the class: a being that arrives at
+	// a house with only the text is addressable and mute, which is a migration
+	// the origin was told succeeded.
+	classes map[[32]byte]class
+	record  *record
+
+	// moved is the word this door published for each name that has gone,
+	// answered by `moved` alone. It is keyed by the name the word is about and
+	// not kept on the being, because both halves of a migration write here and
+	// only one of them has a being to hang it on: the origin points for a name
+	// it held, and the destination points for the name the arriving being wore
+	// before, which is a being at no door any more.
+	moved map[[32]byte]Word
+	// arrived is what the last receive took in — the word it published, the
+	// name it minted, and the voices that came with the standings — which is
+	// everything the migration's second news is sent from.
+	arrived *Arrival
 
 	// armed holds the commitments this door will take a standing over for,
 	// which are not standings and so are not rows.
@@ -258,6 +295,8 @@ func New(f Founding) (*Warden, error) {
 		clock:          f.Clock,
 		beings:         map[[32]byte]*held{},
 		blueprints:     map[[32]byte]string{},
+		classes:        map[[32]byte]class{},
+		moved:          map[[32]byte]Word{},
 		record:         newRecord(window),
 	}
 	// The public being is the one being every warden already has, of the class
@@ -354,10 +393,39 @@ func (w *Warden) Hold(blueprint string, object Being, keys Keys) ([32]byte, erro
 		secret:     keys.Secret,
 		digest:     digest,
 		commitment: arithmetic.Commit(w.name, arithmetic.SigningKey(keys.HeirSecret)),
+		heir:       arithmetic.SigningKey(keys.HeirSecret),
 		object:     object,
 		declares:   fieldNames(bp),
 	}
 	return pk, nil
+}
+
+// Welcome says this house can make a being of one class, and how. It is what a
+// destination does before a migration: Article IX gates `receive` on the
+// destination already holding the arriving class, and this is what holding one
+// means — the text to check the digest against, and the program to run behind
+// the name the door is about to mint.
+//
+// It is per class and not per arrival. The keys a receive mints are handed in
+// the judgment's own Draws, where every draw of randomness in this kit is
+// handed, so nothing has to be armed a message in advance; what the door
+// cannot take from a draw is the host's program, and that belongs to the class
+// rather than to the one being that happens to arrive next.
+//
+// A class registered twice takes the later maker: a host re-registering is
+// saying what a being of that class is now.
+func (w *Warden) Welcome(blueprint string, make Maker) ([32]byte, error) {
+	if make == nil {
+		return [32]byte{}, errors.New("warden: a class with no maker is not a class")
+	}
+	bp, err := notation.Parse(blueprint)
+	if err != nil {
+		return [32]byte{}, err
+	}
+	digest := bp.Digest()
+	w.blueprints[digest] = bp.Text()
+	w.classes[digest] = class{make: make, declares: fieldNames(bp)}
+	return digest, nil
 }
 
 // fieldNames is the blueprint read as a scope: the names it declares, and
@@ -620,15 +688,221 @@ func (w *Warden) Relation(far [32]byte) (name, commitment, padlock [32]byte, hin
 	return rel.warden, rel.commitment, rel.padlock, slices.Clone(rel.hints), true
 }
 
-// Publish records the succession this door published for a being, so the old
-// door can point every arriving ask at where the being went.
-func (w *Warden) Publish(being [32]byte, word Word) error {
+// Publish records the succession this door published for a name, so the door
+// can point every arriving ask at where the being went.
+//
+// The name need not be a being here, and a door that required one could not
+// point for the half of a migration that matters most: a destination points for
+// the name the arriving being wore before, and that name is a being at no door
+// any more. Both halves of a migration publish the identical word, so a peer
+// that asks either house learns the same thing.
+func (w *Warden) Publish(being [32]byte, word Word) {
+	w.moved[being] = word
+}
+
+// Peer is one row that stands at a being, read as the way back to whoever
+// holds it: the voice, the padlock that voice named, and the roads it gave.
+// Both are refreshed by every call that arrives, so this is the freshest way
+// back the door has.
+type Peer struct {
+	Voice   [32]byte
+	Padlock *[32]byte
+	Hints   []string
+}
+
+// Peers are the rows that stand at one being: who must be told when that being
+// moves, and how to reach them. Ordered by the voice's bytes ascending,
+// because ranging a Go map is randomised and a list of who is owed news is not
+// a thing that should differ between two runs.
+func (w *Warden) Peers(being [32]byte) []Peer {
+	out := []Peer{}
+	for _, row := range w.record.in {
+		if !row.beings[being] {
+			continue
+		}
+		out = append(out, Peer{Voice: row.voice, Padlock: row.padlock, Hints: slices.Clone(row.hints)})
+	}
+	slices.SortFunc(out, func(a, b Peer) int { return compareKeys(a.Voice, b.Voice) })
+	return out
+}
+
+// Departing is what the origin's half of a migration needs, once the cargo has
+// landed: the being's committed heir, which signs the first news and is the
+// successor the peer hashes; the commitment `receive` answered, which is the
+// one fact the origin cannot invent; and where the being answers now.
+type Departing struct {
+	HeirSecret [32]byte
+	Commitment [32]byte
+	Name       [32]byte
+	Padlock    [32]byte
+	Hints      []string
+}
+
+// Departed is what the origin holds after departing: the word to send, the key
+// that signs it, and the peers owed it.
+type Departed struct {
+	Word Word
+	// Voice is the being's committed heir. It is handed back because the first
+	// news is signed by it and the origin no longer holds the being: after the
+	// double rotation every key the old warden held for it is dead.
+	Voice       [32]byte
+	VoiceSecret [32]byte
+	Peers       []Peer
+}
+
+// Depart is the origin's half, after the cargo has landed. It publishes the
+// succession of the being's committed heir — carrying as its next commitment
+// the one `receive` answered, and naming the new door — and stops acting on the
+// being's behalf for good.
+//
+// The old door never forwards a call and never acts on the being's behalf
+// again. The standings stay so a peer still reaches the door and is pointed;
+// the relations went with the cargo, so the old door holds no voice of the
+// being's any more and can spend nothing on it.
+func (w *Warden) Depart(being [32]byte, d Departing) (Departed, error) {
 	h, ok := w.beings[being]
 	if !ok {
-		return errors.New("warden: no being of that name")
+		return Departed{}, errors.New("warden: no being of that name")
 	}
-	h.moved = &word
-	return nil
+	successor := arithmetic.SigningKey(d.HeirSecret)
+	// The peer believes the succession by hashing the successor against the
+	// commitment it holds, so a key this door never committed to would compose
+	// news nobody can believe.
+	if arithmetic.Commit(w.name, successor) != h.commitment {
+		return Departed{}, errors.New("warden: that key is not the heir this being committed to")
+	}
+	word := Word{
+		Being:      &being,
+		Successor:  &successor,
+		Commitment: &d.Commitment,
+		// Where it answers has changed, so the word says so, and the peer
+		// rewrites its row entire from it.
+		Name:    &d.Name,
+		Padlock: &d.Padlock,
+		Hints:   slices.Clone(d.Hints),
+	}
+	told := w.Peers(being)
+	// The relations went with the cargo, so the old door holds no voice of the
+	// being's any more.
+	w.Forget(being, nil)
+	// The pointer stays and answers `moved` alone: every other ask meets
+	// silence, and a peer that never asks `moved` learns by the news below.
+	w.Publish(being, word)
+	return Departed{Word: word, Voice: successor, VoiceSecret: d.HeirSecret, Peers: told}, nil
+}
+
+// Arrival is the destination's half of a migration, once a cargo has landed:
+// the word this door published, the name it minted, and the peers that arrived
+// with the standings.
+//
+// Migration is that message sent twice (Article XIV). The origin's Departed is
+// the first — the being's committed heir, carrying as its next commitment the
+// one `receive` answered. This is the second, and the only key that can send it
+// is the one this door generated and the origin never saw.
+type Arrival struct {
+	Word Word
+	// Being is the name the arriving being wears here, and BeingSecret its
+	// key. The second news is signed by it: the peer holds the hash of it from
+	// the first news, so this is the one key the peer can believe it from.
+	Being       [32]byte
+	BeingSecret [32]byte
+	// Peers are the rows that arrived with the cargo, read as the way back to
+	// each — freshest at the moment they are read, because a call that arrives
+	// in the meantime refreshes the padlock and the roads.
+	Peers []Peer
+
+	voices [][32]byte
+}
+
+// Landed hands back what the second news is composed from, and names the roads
+// this door answers on into the word it published — so the word a peer hears
+// and the word a peer gets by asking `moved` are the identical bytes.
+//
+// The roads are handed in rather than held, as they are for a card, a grant,
+// an ask and every other act this kit composes. A door that lands a being and
+// never says where it answers publishes a word with no roads, which a peer
+// reads as "the road did not change" and which would leave it calling the
+// house the being left.
+func (w *Warden) Landed(hints []string) (Arrival, bool) {
+	if w.arrived == nil {
+		return Arrival{}, false
+	}
+	a := *w.arrived
+	a.Word.Hints = slices.Clone(hints)
+	w.arrived.Word = a.Word
+	w.Publish(*a.Word.Being, a.Word)
+
+	// The rows that came with the cargo, and only those: a standing granted
+	// here since the being landed was never told the being moved, because it
+	// never knew the being anywhere else.
+	held := map[[32]byte]bool{}
+	for _, voice := range a.voices {
+		held[voice] = true
+	}
+	for _, one := range w.Peers(a.Being) {
+		if held[one.Voice] {
+			a.Peers = append(a.Peers, one)
+		}
+	}
+	return a, true
+}
+
+// Tell is one piece of news this door composes for one peer: the word, the key
+// that signs it, and the number it spends against that peer's own mark.
+type Tell struct {
+	Peer Peer
+	// Voice is whichever key the peer can believe this word from. Article XIV
+	// gives two roads and only two: the name, which has not moved, or a key the
+	// peer holds the hash of.
+	Voice       [32]byte
+	VoiceSecret [32]byte
+	Word        Word
+	// Seq is the number this news spends. News counts against the mark the peer
+	// keeps for this house, which is its own counter and never the one this
+	// door's callers spend, so the sender names it.
+	Seq       int64
+	Allowance envelope.Allowance
+	// Hints are how to speak to this door later, the same roads an ask carries.
+	Hints []string
+}
+
+// News composes one piece of news and hands back the sealed bytes. It is an
+// ordinary envelope — ephemeral key outside, one signed payload sealed inside,
+// the recipient named, a number that only rises — judged at the peer's door by
+// the same steps as any ask. What makes it news is only where its voice is
+// found: not in the inbound record, which says who may enter, but in the
+// outbound one, which is the peer's own memory of the houses it holds
+// relations with.
+//
+// News names no being: the voice is placed in the outbound record, and that is
+// the whole of what makes it news.
+func (w *Warden) News(ephemeral [32]byte, t Tell) ([]byte, error) {
+	// An inbound row keeps the padlock the peer named and never that peer's
+	// warden name — a door never learns the house behind a voice — so the
+	// recipient is the padlock. A padlock is per door, so it binds the message
+	// to one door exactly as a name would.
+	//
+	// A peer that has never spoken left no way back. It is reached by the only
+	// means left: it eventually asks, and this door tells it it has moved.
+	if t.Peer.Padlock == nil {
+		return nil, errors.New("warden: that peer left no way back")
+	}
+	if t.Allowance.Time < 1 || t.Allowance.Hops < 0 {
+		return nil, errors.New("warden: a call with no leash left")
+	}
+	args, err := EncodeWord(t.Word)
+	if err != nil {
+		return nil, err
+	}
+	return envelope.SealSay(ephemeral, *t.Peer.Padlock, t.VoiceSecret, envelope.Say{
+		Voice:     t.Voice,
+		Recipient: *t.Peer.Padlock,
+		Seq:       t.Seq,
+		Padlock:   w.padlock,
+		Hints:     slices.Clone(t.Hints),
+		Allowance: t.Allowance,
+		Method:    &envelope.Method{Name: FieldTell, Args: args},
+	})
 }
 
 // Pack is a migration's cargo, read off what this warden holds for one being:
@@ -639,15 +913,26 @@ func (w *Warden) Publish(being [32]byte, word Word) error {
 // The cells come from the host, because a being's memory is its own and the
 // Being interface never hands it over.
 //
-// The rows are ordered by pk ascending. The law derives an order only for the
-// estate, so this one is chosen rather than read — two kits packing one being
-// agree on the bytes only because both sort.
+// Every list is ordered by the rule Article IX gives, and the order is derived
+// rather than chosen: standings by the voice's bytes, relations by the far
+// warden's, beings under a standing by their pk bytes, and spent numerically —
+// all ascending. A cargo crosses the wire, so two wardens packing one being
+// must produce one byte string, and ranging a Go map is deliberately
+// randomised: unsorted, this would differ from itself between two runs of one
+// process.
 func (w *Warden) Pack(being [32]byte, cells []byte) (Cargo, error) {
 	h, ok := w.beings[being]
 	if !ok {
 		return Cargo{}, errors.New("warden: no being of that name")
 	}
-	c := Cargo{Being: h.pk, Digest: h.digest, Cells: cells}
+	// Packed under the name the first rotation gives the being, which is the
+	// committed heir. Migration is one message sent twice: the first moves the
+	// being's identity to that heir, and the second — the destination's — moves
+	// it on to the key the destination minted. A cargo packed under the name
+	// the being wore before would leave the destination composing a succession
+	// of a name every peer has already succeeded past, and a peer refuses a
+	// succession of a name it holds no commitment for.
+	c := Cargo{Being: h.heir, Digest: h.digest, Cells: cells}
 	for _, row := range w.record.in {
 		if !row.beings[being] {
 			continue
@@ -660,8 +945,11 @@ func (w *Warden) Pack(being [32]byte, cells []byte) (Cargo, error) {
 			// The name the heir commitment was minted under travels with the
 			// row, or a migrated standing could never verify an older
 			// commitment again.
-			Name:   row.name,
-			Beings: [][32]byte{being},
+			Name: row.name,
+			// Under the same name the cargo is packed under, for the same
+			// reason: this row travels to a door where the being's old name
+			// stands in nothing.
+			Beings: [][32]byte{h.heir},
 			Mark:   row.mark,
 			// The replay record travels whole. A mark alone would make the new
 			// door either refuse everything at or below it — killing a caller
@@ -700,6 +988,9 @@ func (w *Warden) Pack(being [32]byte, cells []byte) (Cargo, error) {
 	}
 	slices.SortFunc(c.Standings, func(a, b Standing) int { return compareKeys(a.Voice, b.Voice) })
 	slices.SortFunc(c.Relations, func(a, b Relation) int { return compareKeys(a.Warden, b.Warden) })
+	for _, one := range c.Standings {
+		slices.SortFunc(one.Beings, compareKeys)
+	}
 	return c, nil
 }
 
@@ -1211,10 +1502,15 @@ func (w *Warden) place(say envelope.Say) (kind, *inbound, *outbound, error) {
 	}
 
 	if rel, fresh := w.hear(say.Voice); rel != nil {
-		if say.Commitment != nil {
-			// News carries its next commitment inside the word, not here.
-			return 0, nil, nil, errors.New("warden: news carrying a commitment")
-		}
+		// A commitment the message carries is ignored here rather than refused.
+		// Article XI names two refusals on this field — a plain ask carrying
+		// one, a rotation carrying none — and they are the only two: each has a
+		// mechanical reason in step 4, and neither reason exists for news,
+		// which places a voice by the outbound record and never reads the
+		// field. News carries its next commitment inside the word. A door that
+		// refused a stray one would meet a house that has succeeded with
+		// silence, and a house that has succeeded and is not believed is a
+		// house nobody can reach.
 		if fresh {
 			// A succession starts the news mark fresh: the old key died with
 			// its count. Only a padlock replacement, announced by a house that
@@ -1315,7 +1611,7 @@ func (w *Warden) route(draws Draws, leash Leash, k kind, say envelope.Say, row *
 	if target == w.self() {
 		return w.own(draws, k, row, *say.Method)
 	}
-	if h.moved != nil {
+	if _, gone := w.moved[target]; gone {
 		// The old door only points: it answers `moved` with the succession and
 		// every other ask meets silence. An answer's data is the field's
 		// declared answer type by the notation's rules, and a succession is not
@@ -1377,13 +1673,16 @@ func (w *Warden) own(draws Draws, k kind, row *inbound, m envelope.Method) ([]by
 		// it wore before stands in no standing here. If a published pointer
 		// were not reach enough, the old door could not point about the one
 		// being Article XIII sends every peer behind the news to ask it about.
-		h, held := w.beings[being]
-		pointing := held && h.moved != nil && row != nil
+		word, published := w.moved[being]
+		// To a holder who reached it before, never to a stranger. A stranger
+		// has no row, and a door that pointed for anyone who asked would hand
+		// a succession to whoever guessed a name.
+		pointing := published && row != nil
 		if !w.reaches(row, being) && !pointing {
 			return nil, errors.New("warden: that voice does not reach that being")
 		}
-		if held && h.moved != nil {
-			return w.answerOf(FieldMoved, wordValue(*h.moved))
+		if published {
+			return w.answerOf(FieldMoved, wordValue(word))
 		}
 		// An absent optional is a legal answer to a legal ask: nothing has
 		// moved, so moved answers absence.
@@ -1536,8 +1835,14 @@ func (w *Warden) receive(draws Draws, row *inbound, m envelope.Method) ([]byte, 
 	if _, taken := w.beings[cargo.Being]; taken {
 		return nil, errors.New("warden: a being of that name already lives here")
 	}
-	if _, known := w.blueprints[cargo.Digest]; !known {
-		return nil, errors.New("warden: no blueprint of that digest")
+	// **A destination that does not already hold that class refuses the cargo
+	// in silence, and there is nobody it may ask** (Article IX). Holding the
+	// class is holding the program: a house with only the text could take the
+	// being in, answer the commitment, and leave it standing there unable to
+	// answer a field its own blueprint declares.
+	c, known := w.classes[cargo.Digest]
+	if !known {
+		return nil, errors.New("warden: no class of that digest lives here")
 	}
 	// The being's new name at this house, and that name's own heir.
 	pk := arithmetic.SigningKey(draws.Being)
@@ -1545,11 +1850,23 @@ func (w *Warden) receive(draws Draws, row *inbound, m envelope.Method) ([]byte, 
 	if pk == cargo.Being {
 		return nil, errors.New("warden: a receive minting the name the being already wore")
 	}
+	// The cells are the being's own memory and travelled with it, so they are
+	// what it is made from. Nothing else in this door reads them.
+	object, err := c.make(cargo.Cells)
+	if err != nil {
+		return nil, err
+	}
 	w.beings[pk] = &held{
 		pk:         pk,
 		secret:     draws.Being,
 		digest:     cargo.Digest,
 		commitment: arithmetic.Commit(w.name, heir),
+		// The heir the door minted, so a being that arrived can migrate again:
+		// a cargo is packed under the name the being takes on the first of a
+		// migration's two rotations, and a being with no heir has none.
+		heir:     heir,
+		object:   object,
+		declares: c.declares,
 	}
 	// The inbound record and the replay window travel with the being, or every
 	// peer's standing would have to be regranted and every spent number would
@@ -1605,6 +1922,34 @@ func (w *Warden) receive(draws Draws, row *inbound, m envelope.Method) ([]byte, 
 		}
 	}
 	_ = row
+
+	// The second rotation: to a key this door generated and the origin never
+	// saw. The word is the old door's shape exactly, so a peer that hears it
+	// and a peer that asks the old door learn the identical thing.
+	//
+	// It is published here for the name the being wore before, because that is
+	// the name every peer behind the news still holds. A destination that
+	// recorded nothing would leave those peers with one road to the being's new
+	// home — asking the door it left — and no house should be the only way to
+	// find a house.
+	word := Word{
+		Being:      &cargo.Being,
+		Successor:  &pk,
+		Commitment: &w.beings[pk].commitment,
+		Name:       &w.name,
+		Padlock:    &w.padlock,
+		// The roads are the host's, as they are for every other act this kit
+		// composes — a card, a grant, an ask, a piece of news. Landed is where
+		// they are named, and it names them into this same word.
+	}
+	w.Publish(cargo.Being, word)
+	voices := make([][32]byte, 0, len(cargo.Standings))
+	for _, s := range cargo.Standings {
+		voices = append(voices, s.Voice)
+	}
+	slices.SortFunc(voices, compareKeys)
+	w.arrived = &Arrival{Word: word, Being: pk, BeingSecret: draws.Being, voices: voices}
+
 	// The commitment of the being's new name, hashed under this door's own.
 	return w.answerOf(FieldReceive, arithmetic.Commit(w.name, pk))
 }

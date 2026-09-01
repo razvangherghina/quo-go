@@ -327,6 +327,90 @@ func TestTheAnswerIsSealedToTheReturnPadlock(t *testing.T) {
 	}
 }
 
+// TestAnArrivedBeingAnswers holds the half of a migration everything else here
+// assumes: a being that migrated is a being, so a peer that stood at it before
+// the move asks it a field of its own blueprint and is answered. A destination
+// that took the identity, the cells and both records and put no program behind
+// the name it minted would pass every other assertion in this file and leave
+// the being addressable and mute.
+func TestAnArrivedBeingAnswers(t *testing.T) {
+	g := stand(t) // the destination, and the ordinary gate a receive spends
+
+	follower := arithmetic.SigningKey(secret("follower"))
+	arriving := arithmetic.SigningKey(secret("arriving"))
+	packed, err := warden.EncodeCargo(warden.Cargo{
+		Being:  arriving,
+		Digest: arithmetic.Hash([]byte(todoText)),
+		// The being's own memory, which is what it is made from at the far
+		// house: two items it will still count after the move.
+		Cells: []byte("milk\neggs"),
+		Standings: []warden.Standing{{
+			Voice:      follower,
+			Commitment: arithmetic.Commit(g.w.Name(), arithmetic.SigningKey(secret("followerHeir"))),
+			Beings:     [][32]byte{arriving},
+			Mark:       11,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	g.rotate(1)
+	s := g.say(g.inv.Heir, 2)
+	s.Being = g.own()
+	s.Method = &envelope.Method{Name: warden.FieldReceive, Args: packed}
+	g.answer(g.judge(g.inv.HeirSecret, s))
+
+	// The peer reaches the being by the name this door minted and by that name
+	// alone, on the standing that travelled and above the mark that travelled
+	// with it.
+	arrivedAs := arithmetic.SigningKey(secret("receiveBeing"))
+	ask := g.say(follower, 12)
+	ask.Being = &arrivedAs
+	ask.Method = &envelope.Method{Name: "count"}
+	data := g.answer(g.judge(secret("follower"), ask))
+	if len(data) != 8 || data[7] != 2 {
+		t.Fatalf("the arrived being answered %v, want the two items its cells carried", data)
+	}
+
+	// And the blueprint is still the scope: a name it never declared is not
+	// reached for on the object at all.
+	ask = g.say(follower, 13)
+	ask.Being = &arrivedAs
+	ask.Method = &envelope.Method{Name: "undeclared"}
+	g.silent(g.judge(secret("follower"), ask))
+}
+
+// TestACargoOfAClassThisHouseCannotMakeIsRefused holds Article IX's one gate on
+// a cargo: a destination that does not already hold the class refuses it in
+// silence, and there is nobody it may ask. Holding the class is holding the
+// program — a house with only the blueprint's text could answer the commitment
+// and leave the being unable to act.
+func TestACargoOfAClassThisHouseCannotMakeIsRefused(t *testing.T) {
+	g := stand(t)
+
+	const other = "Lamp\n  lit() bool\n"
+	packed, err := warden.EncodeCargo(warden.Cargo{
+		Being:  arithmetic.SigningKey(secret("arriving")),
+		Digest: arithmetic.Hash([]byte(other)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	g.rotate(1)
+	s := g.say(g.inv.Heir, 2)
+	s.Being = g.own()
+	s.Method = &envelope.Method{Name: warden.FieldReceive, Args: packed}
+	g.silent(g.judge(g.inv.HeirSecret, s))
+
+	// Its text alone is not the class: a house that can hand the blueprint out
+	// still cannot make one.
+	if _, err := g.w.Welcome(other, nil); err == nil {
+		t.Fatal("a class with no maker was welcomed")
+	}
+}
+
 // TestABeingArrivesAbleToActAgain holds the half of a migration that is easy
 // to forget: a being's outbound record travels with it, and the cargo carries
 // a relation row for each. A being that only answers would migrate perfectly
@@ -439,6 +523,145 @@ func TestABeingArrivesAbleToActAgain(t *testing.T) {
 	}
 }
 
+// TestTheOriginComposesTheNewsItsPeersAreOwed holds the origin's half of a
+// migration, which is the half that has to reach somebody. The cargo lands and
+// the destination answers a commitment; what remains is a word to every peer
+// that stands at the being, signed by the heir the being committed, and it is
+// composed here rather than by the host — a house that packed a cargo and then
+// had to invent the announcement itself would invent a different one at every
+// ground.
+func TestTheOriginComposesTheNewsItsPeersAreOwed(t *testing.T) {
+	origin := house(t, "departing")
+	peer := house(t, "hearing")
+	being, err := origin.Hold(todoText, &todo{},
+		warden.Keys{Secret: secret("departing/being"), HeirSecret: secret("departing/beingHeir")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inv, err := origin.Grant(being,
+		warden.Keys{Secret: secret("departing/voice"), HeirSecret: secret("departing/voiceHeir")},
+		origin.Padlock(), []string{"https://departing.example"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	peer.Stand(peer.Self(), inv, inv.HeirSecret)
+
+	// A peer that has never spoken left no way back: an inbound row keeps the
+	// padlock the peer named, and nothing else in Quo tells a door how to reach
+	// a voice.
+	if told := origin.Peers(being); len(told) != 1 || told[0].Padlock != nil {
+		t.Fatalf("a peer that has never spoken left a way back: %#v", told)
+	}
+	mine := secret("departing/peerNextHeir")
+	message, _, err := peer.Ask(secret("departing/askEphemeral"), warden.Reach{
+		Far:       origin.Name(),
+		Being:     &being,
+		Allowance: envelope.Allowance{Time: 5000, Hops: 8},
+		NextHeir:  &mine,
+		Hints:     []string{"https://hearing.example"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := origin.Judge(warden.Draws{Ephemeral: secret("departing/answerEphemeral")}, message); err != nil {
+		t.Fatal(err)
+	}
+	told := origin.Peers(being)
+	if len(told) != 1 || told[0].Padlock == nil || *told[0].Padlock != peer.Padlock() {
+		t.Fatalf("the way back was not read off the call that arrived: %#v", told)
+	}
+
+	// The peer holds the being's own commitment, handed over by a describe.
+	// Without it there is no material to believe this being's succession with.
+	successor := arithmetic.SigningKey(secret("departing/beingHeir"))
+	if err := peer.Learn(origin.Name(), being, arithmetic.Commit(origin.Name(), successor)); err != nil {
+		t.Fatal(err)
+	}
+
+	// What `receive` answered at the far house, which is the one fact the
+	// origin carries into the news and cannot invent.
+	landed := house(t, "landing")
+	commitment := arithmetic.Commit(landed.Name(), arithmetic.SigningKey(secret("landing/arrived")))
+
+	// A key this being never committed to composes news nobody can believe, so
+	// it is refused here rather than sent.
+	if _, err := origin.Depart(being, warden.Departing{
+		HeirSecret: secret("departing/nobody"), Commitment: commitment,
+		Name: landed.Name(), Padlock: landed.Padlock(),
+	}); err == nil {
+		t.Fatal("the origin departed on a key the being never committed to")
+	}
+
+	departed, err := origin.Depart(being, warden.Departing{
+		HeirSecret: secret("departing/beingHeir"),
+		Commitment: commitment,
+		Name:       landed.Name(),
+		Padlock:    landed.Padlock(),
+		Hints:      []string{"https://landing.example"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if departed.Voice != successor || len(departed.Peers) != 1 {
+		t.Fatalf("the departure is %#v", departed)
+	}
+	// The relations went with the cargo, so the old door can spend nothing on
+	// the being's behalf.
+	if _, _, err := origin.Ask(secret("departing/askEphemeral2"), warden.Reach{
+		Far: peer.Name(), Allowance: envelope.Allowance{Time: 5000, Hops: 8},
+	}); err == nil {
+		t.Fatal("the old door still holds a voice of the being's")
+	}
+
+	word, err := origin.News(secret("departing/newsEphemeral"), warden.Tell{
+		Peer:        departed.Peers[0],
+		Voice:       departed.Voice,
+		VoiceSecret: departed.VoiceSecret,
+		Word:        departed.Word,
+		Seq:         1,
+		Allowance:   envelope.Allowance{Time: 5000, Hops: 8},
+		Hints:       []string{"https://departing.example"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := peer.Judge(warden.Draws{Ephemeral: secret("hearing/answerEphemeral")}, word)
+	if err != nil {
+		t.Fatalf("the peer met the news it is owed with silence: %v", err)
+	}
+	if data == nil {
+		t.Fatal("the news was not answered at all")
+	}
+
+	// Believed news rewrites the row entire, so the peer now stands at the
+	// house the being moved to and reaches it by the successor's name.
+	name, held, padlock, hints, ok := peer.Relation(landed.Name())
+	if !ok || name != landed.Name() || padlock != landed.Padlock() {
+		t.Fatalf("the relation did not follow the being: %x %v", name, ok)
+	}
+	if held != inv.Commitment {
+		t.Fatal("the house's own commitment was overwritten by a being's")
+	}
+	if len(hints) != 1 || hints[0] != "https://landing.example" {
+		t.Fatalf("the roads did not travel: %v", hints)
+	}
+	if _, _, _, _, ok := peer.Relation(origin.Name()); ok {
+		t.Fatal("the peer still stands at the door the being left")
+	}
+
+	// A peer that never spoke is reached by the only means left: it asks, and
+	// the old door tells it the being has moved.
+	if _, err := origin.News(secret("departing/newsEphemeral2"), warden.Tell{
+		Peer:      warden.Peer{Voice: departed.Peers[0].Voice},
+		Voice:     departed.Voice,
+		Word:      departed.Word,
+		Seq:       1,
+		Allowance: envelope.Allowance{Time: 5000, Hops: 8},
+	}); err == nil {
+		t.Fatal("news left for a peer that named no way back")
+	}
+}
+
 // TestPackCarriesTheStandingsAtTheBeingThatMoves holds the other half: the
 // inbound rows travel so its peers keep their standing at it, and only the
 // being that moves travels in a row — what the voice reaches here besides it
@@ -480,8 +703,16 @@ func TestPackCarriesTheStandingsAtTheBeingThatMoves(t *testing.T) {
 	if len(row.Spent) != 1 || row.Spent[0] != 1 {
 		t.Fatalf("the window travelled as %v, want [1]", row.Spent)
 	}
-	if len(row.Beings) != 1 || row.Beings[0] != g.being {
+	// Only the being that moves, and under the name the first rotation gives
+	// it: a cargo is packed under the committed heir, because the second of
+	// migration's two rotations succeeds that name and not the one the being
+	// wore here.
+	heir := arithmetic.SigningKey(secret("beingHeir"))
+	if len(row.Beings) != 1 || row.Beings[0] != heir {
 		t.Fatalf("the standing carries %d beings, want only the one that moves", len(row.Beings))
+	}
+	if cargo.Being != heir {
+		t.Fatal("the cargo is packed under the name the being wore here, not the one it takes")
 	}
 	if cargo.Digest != arithmetic.Hash([]byte(todoText)) {
 		t.Fatal("the cargo does not name the being's class")
@@ -793,4 +1024,199 @@ func TestACopyOfTheInvitationCanNoLongerTakeTheStanding(t *testing.T) {
 			t.Fatal("a copy of a spent invitation moved the standing")
 		}
 	}
+}
+
+// TestAPeerLearnsTheNewHouseFromTheDestinationItself walks a whole migration
+// with a real peer at both ends, which is the only way the destination's half
+// is proved: everything up to the cargo landing can be right while the new
+// house is unable to say a word about the being it just took in.
+//
+// Migration is one message sent twice (Article XIV). The origin sends the
+// first, signed by the being's committed heir. The second is signed by the key
+// the destination generated and the origin never saw, and it can only come
+// from the new house. Without it a peer's only road to the being's new home is
+// asking the door it left, and no house should be the only way to find a
+// house.
+func TestAPeerLearnsTheNewHouseFromTheDestinationItself(t *testing.T) {
+	g := stand(t) // the destination, and the ordinary gate a receive spends
+	origin := house(t, "whole/origin")
+	peer := house(t, "whole/peer")
+
+	traveller, err := origin.Hold(todoText, &todo{},
+		warden.Keys{Secret: secret("whole/being"), HeirSecret: secret("whole/beingHeir")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inv, err := origin.Grant(traveller,
+		warden.Keys{Secret: secret("whole/voice"), HeirSecret: secret("whole/voiceHeir")},
+		origin.Padlock(), []string{"https://origin.example"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	peer.Stand(peer.Self(), inv, inv.HeirSecret)
+
+	// The peer speaks once, which is how the origin learns the way back to it
+	// and how the standing changes hands. Both travel in the cargo.
+	next := secret("whole/peerHeir")
+	message, _, err := peer.Ask(secret("whole/ephemeral"), warden.Reach{
+		Far:       origin.Name(),
+		Being:     &traveller,
+		Allowance: envelope.Allowance{Time: 5000, Hops: 8},
+		NextHeir:  &next,
+		Hints:     []string{"https://peer.example"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := origin.Judge(warden.Draws{Ephemeral: secret("whole/originEphemeral")}, message); err != nil {
+		t.Fatalf("the origin refused the peer: %v", err)
+	}
+	// The commitment a describe hands over, without which the peer holds no
+	// material to believe this being's succession.
+	committed := arithmetic.SigningKey(secret("whole/beingHeir"))
+	if err := peer.Learn(origin.Name(), traveller, arithmetic.Commit(origin.Name(), committed)); err != nil {
+		t.Fatal(err)
+	}
+
+	// The cargo is packed under the name the first rotation gives the being,
+	// so the second rotation succeeds the name the peer will hold by then.
+	cargo, err := origin.Pack(traveller, []byte("state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cargo.Being != committed {
+		t.Fatal("the cargo is not packed under the name the first rotation gives the being")
+	}
+	packed, err := warden.EncodeCargo(cargo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g.rotate(1)
+	s := g.say(g.inv.Heir, 2)
+	s.Being = g.own()
+	s.Method = &envelope.Method{Name: warden.FieldReceive, Args: packed}
+	answered := g.answer(g.judge(g.inv.HeirSecret, s))
+	var commitment [32]byte
+	copy(commitment[:], answered)
+
+	// The destination's half. The word is composed by the kit and not by the
+	// host: a house that took a cargo in and then had to invent the
+	// announcement would invent a different one at every ground.
+	landed, ok := g.w.Landed([]string{"https://landing.example"})
+	if !ok {
+		t.Fatal("the destination has nothing to say about the being it just took in")
+	}
+	arrivedAs := arithmetic.SigningKey(secret("receiveBeing"))
+	if landed.Being != arrivedAs || landed.BeingSecret != secret("receiveBeing") {
+		t.Fatal("the destination does not hand back the key it generated")
+	}
+	if landed.Word.Being == nil || *landed.Word.Being != cargo.Being {
+		t.Fatal("the second word does not succeed the name the first one moved to")
+	}
+	if landed.Word.Successor == nil || *landed.Word.Successor != arrivedAs {
+		t.Fatal("the second word does not name the key the origin never saw")
+	}
+	if landed.Word.Commitment == nil || *landed.Word.Commitment != arithmetic.Commit(g.w.Name(), arithmetic.SigningKey(secret("receiveHeir"))) {
+		t.Fatal("the second word carries no material for the succession after it")
+	}
+	if len(landed.Peers) != 1 || landed.Peers[0].Padlock == nil || *landed.Peers[0].Padlock != peer.Padlock() {
+		t.Fatalf("the peers that arrived with the standings are %#v", landed.Peers)
+	}
+
+	// The origin's half, carrying as its next commitment the one `receive`
+	// answered — the one fact it cannot invent.
+	departed, err := origin.Depart(traveller, warden.Departing{
+		HeirSecret: secret("whole/beingHeir"),
+		Commitment: commitment,
+		Name:       g.w.Name(),
+		Padlock:    g.w.Padlock(),
+		Hints:      []string{"https://landing.example"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := origin.News(secret("whole/firstNews"), warden.Tell{
+		Peer: departed.Peers[0], Voice: departed.Voice, VoiceSecret: departed.VoiceSecret,
+		Word: departed.Word, Seq: 1, Allowance: envelope.Allowance{Time: 5000, Hops: 8},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := peer.Judge(warden.Draws{Ephemeral: secret("whole/peerEphemeral")}, first); err != nil {
+		t.Fatalf("the peer met the first news with silence: %v", err)
+	}
+
+	// And the second, from the new house itself, signed by the key it
+	// generated. A being's succession starts the news mark fresh, so it counts
+	// from one again.
+	second, err := g.w.News(secret("whole/secondNews"), warden.Tell{
+		Peer: landed.Peers[0], Voice: landed.Being, VoiceSecret: landed.BeingSecret,
+		Word: landed.Word, Seq: 1, Allowance: envelope.Allowance{Time: 5000, Hops: 8},
+		Hints: []string{"https://landing.example"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := peer.Judge(warden.Draws{Ephemeral: secret("whole/peerEphemeral2")}, second); err != nil {
+		t.Fatalf("the peer met the second news with silence: %v", err)
+	}
+
+	// Believed news rewrites the row entire, so the peer now stands at the new
+	// house and reaches the being by the name that house minted.
+	name, held, padlock, hints, ok := peer.Relation(g.w.Name())
+	if !ok || name != g.w.Name() || padlock != g.w.Padlock() {
+		t.Fatalf("the relation did not follow the being: %x %v", name, ok)
+	}
+	if held != inv.Commitment {
+		t.Fatal("the house's own commitment was overwritten by a being's")
+	}
+	if len(hints) != 1 || hints[0] != "https://landing.example" {
+		t.Fatalf("the roads did not travel: %v", hints)
+	}
+
+	// And the destination points for the name the being used to wear. A peer
+	// behind the news asks the door it knows; a new house that could not point
+	// for the old name would make the old door the only way to find the being,
+	// which is the whole of what Article XIII's pointer exists to avoid.
+	arg, err := wire.Encode(warden.Own, keyType(), cargo.Being)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := g.w.Name()
+	message, _, err = peer.Ask(secret("whole/ephemeral2"), warden.Reach{
+		Far:       g.w.Name(),
+		Being:     &at,
+		Method:    &envelope.Method{Name: warden.FieldMoved, Args: arg},
+		Allowance: envelope.Allowance{Time: 5000, Hops: 8},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reply, err := g.w.Judge(warden.Draws{Ephemeral: secret("whole/movedEphemeral")}, message)
+	if err != nil {
+		t.Fatalf("the destination met a holder's `moved` with silence: %v", err)
+	}
+	heard, err := peer.Hear(peer.PadlockSecret(), reply)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(heard.Data) == 0 || heard.Data[0] != 1 {
+		t.Fatalf("`moved` answered %x where the word was due", heard.Data)
+	}
+	word, err := warden.DecodeWord(heard.Data[1:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The word a peer hears and the word a peer gets by asking are the
+	// identical bytes, roads included.
+	if !reflect.DeepEqual(word, landed.Word) {
+		t.Fatalf("the published word is %#v, want %#v", word, landed.Word)
+	}
+
+	// A stranger gets nothing: the pointer is owed to a holder who reached the
+	// being before, and never to whoever guessed a name.
+	stranger := g.say(arithmetic.SigningKey(secret("whole/passerby")), 1)
+	stranger.Being = g.own()
+	stranger.Method = &envelope.Method{Name: warden.FieldMoved, Args: arg}
+	g.silent(g.judge(secret("whole/passerby"), stranger))
 }

@@ -3,6 +3,7 @@ package warden_test
 import (
 	"bytes"
 	"errors"
+	"strings"
 	"testing"
 
 	"quo.systems/kit/arithmetic"
@@ -18,6 +19,17 @@ import (
 const todoText = "ToDo\n  add(title text) text\n  count() int\n"
 
 type todo struct{ items []string }
+
+// todoFrom is what a house that welcomes this class does with a cargo: it makes
+// the being from the cells that travelled with it, which is the whole of what
+// the origin sent that is not identity or record.
+func todoFrom(cells []byte) (warden.Being, error) {
+	o := &todo{}
+	if len(cells) > 0 {
+		o.items = strings.Split(string(cells), "\n")
+	}
+	return o, nil
+}
 
 func (o *todo) Invoke(call warden.Call) ([]byte, error) {
 	switch call.Method {
@@ -75,6 +87,11 @@ func standLimited(t *testing.T, limit int64) *ground {
 	}
 	being, err := w.Hold(todoText, &todo{}, warden.Keys{Secret: secret("being"), HeirSecret: secret("beingHeir")})
 	if err != nil {
+		t.Fatal(err)
+	}
+	// This house can make a being of that class, which is what lets a being of
+	// it migrate here at all.
+	if _, err := w.Welcome(todoText, todoFrom); err != nil {
 		t.Fatal(err)
 	}
 	returned, err := arithmetic.SealingKey(secret("returnPadlock"))
@@ -611,11 +628,9 @@ func TestMovedAnswersAbsence(t *testing.T) {
 
 	successor := arithmetic.SigningKey(secret("successor"))
 	next := arithmetic.Commit(successor, successor)
-	if err := g.w.Publish(g.being, warden.Word{
+	g.w.Publish(g.being, warden.Word{
 		Being: &g.being, Successor: &successor, Commitment: &next, Hints: []string{"https://new.example"},
-	}); err != nil {
-		t.Fatal(err)
-	}
+	})
 	s = g.say(g.inv.Heir, 3)
 	s.Being = g.own()
 	s.Method = &envelope.Method{Name: warden.FieldMoved, Args: arg}
@@ -809,6 +824,31 @@ func TestNewsIsBelievedByAKeyAlreadyHeld(t *testing.T) {
 	}
 	if _, commitment, _, _, ok := peer.Relation(farHeir); !ok || commitment != next {
 		t.Fatal("a refused word moved the relation")
+	}
+
+	// A commitment on the envelope is ignored rather than refused. Article XI
+	// names two refusals on that field — a plain ask carrying one, a rotation
+	// carrying none — and they are the only two: each has a mechanical reason
+	// in step 4, and neither reason exists for news, which places a voice by
+	// the outbound record and never reads the field. A door that refused it
+	// would meet a house that has succeeded with silence, and a house that has
+	// succeeded and is not believed is a house nobody can reach.
+	stray := arithmetic.Commit(farHeir, arithmetic.SigningKey(secret("stray")))
+	args, err = warden.EncodeWord(warden.Word{Padlock: &stolen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s = g.say(arithmetic.SigningKey(secret("farHeir")), 8)
+	s.Commitment = &stray
+	s.Being = g.own()
+	s.Method = &envelope.Method{Name: warden.FieldTell, Args: args}
+	if data := g.answer(g.judge(secret("farHeir"), s)); data != nil {
+		t.Fatalf("tell answered %x where it answers nothing", data)
+	}
+	// And the field decided nothing: the row's commitment is what the word
+	// last said, never what the envelope carried.
+	if _, commitment, _, _, ok := peer.Relation(farHeir); !ok || commitment != next {
+		t.Fatal("a commitment on a news envelope was read as a claim")
 	}
 }
 
