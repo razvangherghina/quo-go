@@ -1,8 +1,10 @@
 package warden_test
 
 import (
+	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"testing"
 
 	"quo.systems/kit/arithmetic"
@@ -1248,4 +1250,196 @@ func TestAPeerLearnsTheNewHouseFromTheDestinationItself(t *testing.T) {
 	stranger.Being = g.own()
 	stranger.Method = &envelope.Method{Name: warden.FieldMoved, Args: arg}
 	g.silent(g.judge(secret("whole/passerby"), stranger))
+}
+
+// road is delivery at distance zero with the two things a road does that a
+// bench otherwise cannot watch: it counts what was handed to it, and it can
+// swallow an answer the far door has already judged, which is exactly the
+// shape of the trap — the message landed and only the answer was lost.
+// Weather itself is not faked here: a door is detached from the memory road,
+// and what comes back is what that road really says about a door that is down.
+type road struct {
+	under   *warden.Memory
+	dropAt  int // which send this road swallows the answer to, counting from one
+	dropped bool
+	sent    int
+}
+
+func (r *road) Send(row warden.Row, message []byte) ([]byte, bool, error) {
+	r.sent++
+	back, later, err := r.under.Send(row, message)
+	if err == nil && r.sent == r.dropAt {
+		r.dropped = true
+		// The door judged it, and the answer never rode back. To the caller
+		// that is a road which answers later and never does.
+		return nil, true, nil
+	}
+	return back, later, err
+}
+
+func (r *road) Arrived(padlock [32]byte, via any) { r.under.Arrived(padlock, via) }
+
+// impatient is a leash short enough that a lost answer is given up on inside
+// the bench's patience. It is the caller's own wait and nothing the far door
+// sees.
+var impatient = envelope.Allowance{Time: 50, Hops: 8}
+
+// TestAcceptRecoversARotationWhoseAnswerWasLost is the caller's half of the
+// trap Article VIII names. The rotation lands at step 4 and the number is
+// judged at step 5, so a silence may mean the takeover already happened: the
+// far door holds the key that signed, with the next key committed. An accept
+// that reads that silence as "nothing landed" throws away a standing the far
+// door is holding and leaves the granter's own key live there, and no retry
+// with the same invitation can get it back. Both rotations meet it, so the
+// case is run against each: the accept's first send and its second.
+func TestAcceptRecoversARotationWhoseAnswerWasLost(t *testing.T) {
+	for _, lost := range []int{1, 2} {
+		t.Run(fmt.Sprintf("rotation %d", lost), func(t *testing.T) {
+			under := warden.NewMemory()
+			r := &road{under: under, dropAt: lost}
+			g := standDelivered(t, r)
+			under.Attach("mem://lost", g.w)
+			g.w.Publish("mem://lost")
+			// The door already stands one standing at this being, so what the
+			// accept leaves behind is read as what the grant added, alone.
+			before := g.w.Standings(g.being)
+			inv, err := g.w.GrantAs(g.being, warden.Keys{
+				Secret: secret("lost/voice"), HeirSecret: secret("lost/voiceHeir"),
+			}, g.w.Padlock(), g.w.Hints())
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			guest := housed(t, "acceptor", r)
+			handle, err := sole(guest.Accept(ctx(), inv, warden.Accepting{Label: "there", Allowance: impatient}))
+			if err != nil {
+				t.Fatalf("a rotation whose answer was lost cost the standing: %v", err)
+			}
+			if !r.dropped {
+				t.Fatal("no answer was dropped, so the case proved nothing")
+			}
+			if v, ok := handle.Call(ctx(), "add", "milk"); !ok || v.(string) != "milk" {
+				t.Fatalf("the recovered standing answered %v %v", v, ok)
+			}
+
+			// Both rotations landed: the grant left one voice at the being, it
+			// is neither key the granter ever saw, and both of those are dead.
+			holders := slices.DeleteFunc(g.w.Standings(g.being), func(k [32]byte) bool {
+				return slices.Contains(before, k)
+			})
+			if len(holders) != 1 {
+				t.Fatalf("the grant left %d standings at the being, want 1", len(holders))
+			}
+			for _, dead := range [][32]byte{secret("lost/voice"), inv.HeirSecret} {
+				if holders[0] == arithmetic.SigningKey(dead) {
+					t.Fatal("the standing stands on a key the granter minted")
+				}
+				s := g.say(arithmetic.SigningKey(dead), 9)
+				s.Being = &g.being
+				s.Method = &envelope.Method{Name: "count", Args: []byte{}}
+				g.silent(g.judge(dead, s))
+			}
+		})
+	}
+}
+
+// TestAcceptThatMetWeatherLeavesTheInvitationWhole holds weather apart from
+// silence. No road carried the bytes, so the far door never heard and the
+// invitation's key is as live as when it was minted: the kit keeps nothing,
+// reports the road inward, and the retry is the same invitation.
+func TestAcceptThatMetWeatherLeavesTheInvitationWhole(t *testing.T) {
+	under := warden.NewMemory()
+	g := standDelivered(t, under)
+	under.Attach("mem://gale", g.w)
+	g.w.Publish("mem://gale")
+	inv, err := g.w.GrantAs(g.being, warden.Keys{
+		Secret: secret("gale/voice"), HeirSecret: secret("gale/voiceHeir"),
+	}, g.w.Padlock(), g.w.Hints())
+	if err != nil {
+		t.Fatal(err)
+	}
+	guest := housed(t, "acceptor", under)
+	var told []warden.Silence
+	guest.Observe(func(s warden.Silence) { told = append(told, s) })
+
+	under.Detach("mem://gale")
+	if _, err := guest.Accept(ctx(), inv, warden.Accepting{Label: "there", Allowance: impatient}); err == nil {
+		t.Fatal("an accept nobody heard answered handles")
+	}
+	if len(told) != 1 {
+		t.Fatalf("the house was told %d times, want the one road that broke", len(told))
+	}
+	var weather *warden.Weather
+	if !errors.As(told[0].Reason, &weather) {
+		t.Fatalf("the road's fault came back as %v", told[0].Reason)
+	}
+	if !slices.Equal(weather.Tried, []string{"mem://gale"}) {
+		t.Fatalf("the roads tried are %v", weather.Tried)
+	}
+	if _, _, _, _, held := guest.RelationAt(inv.Warden); held {
+		t.Fatal("something is kept for a standing never taken")
+	}
+	// The granter still holds what it granted, heir and all.
+	if !slices.Contains(g.w.Standings(g.being), arithmetic.SigningKey(secret("gale/voice"))) {
+		t.Fatal("weather moved a standing at a door that never heard")
+	}
+
+	under.Attach("mem://gale", g.w)
+	handle, err := sole(guest.Accept(ctx(), inv, warden.Accepting{Label: "there", Allowance: impatient}))
+	if err != nil {
+		t.Fatalf("the invitation weather left whole was not accepted: %v", err)
+	}
+	if v, ok := handle.Call(ctx(), "add", "milk"); !ok || v.(string) != "milk" {
+		t.Fatalf("the standing taken after the road came back answered %v %v", v, ok)
+	}
+}
+
+// TestAHandleThatMeetsWeatherKeepsItsShape is the same distinction at the
+// handle. Outward nothing changes — a value or nothing, because a being
+// pushing at a peer that went away is not in error — and inward the house is
+// told it was the road. What the handle must not do is ask the door it just
+// failed to reach whether the being moved.
+func TestAHandleThatMeetsWeatherKeepsItsShape(t *testing.T) {
+	under := warden.NewMemory()
+	r := &road{under: under}
+	g := standDelivered(t, r)
+	under.Attach("mem://squall", g.w)
+	g.w.Publish("mem://squall")
+	inv, err := g.w.GrantAs(g.being, warden.Keys{
+		Secret: secret("squall/voice"), HeirSecret: secret("squall/voiceHeir"),
+	}, g.w.Padlock(), g.w.Hints())
+	if err != nil {
+		t.Fatal(err)
+	}
+	guest := housed(t, "acceptor", r)
+	handle, err := sole(guest.Accept(ctx(), inv, warden.Accepting{Label: "there", Allowance: impatient}))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var told []warden.Silence
+	guest.Observe(func(s warden.Silence) { told = append(told, s) })
+	under.Detach("mem://squall")
+	r.sent = 0
+
+	v, ok := handle.Call(ctx(), "add", "milk")
+	if v != nil || ok {
+		t.Fatalf("a handle that met weather answered %v %v", v, ok)
+	}
+	if len(told) != 1 {
+		t.Fatalf("the house was told %d times, want once", len(told))
+	}
+	var weather *warden.Weather
+	if !errors.As(told[0].Reason, &weather) {
+		t.Fatalf("the road's fault came back as %v", told[0].Reason)
+	}
+	if r.sent != 1 {
+		t.Fatalf("%d asks went down a road that had just failed", r.sent)
+	}
+
+	// The number was spent on this side alone, and the next ask rises past it.
+	under.Attach("mem://squall", g.w)
+	if v, ok := handle.Call(ctx(), "add", "eggs"); !ok || v.(string) != "eggs" {
+		t.Fatalf("the ask after the road came back answered %v %v", v, ok)
+	}
 }

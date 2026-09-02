@@ -9,8 +9,9 @@
 //
 // Delivery has three rules and no more. A row with hints: the first road this
 // ground can speak that carried. A row without hints, or none it can speak: the
-// line that padlock's last ask arrived on, if still held. Neither: weather, and
-// the number was spent.
+// line that padlock's last ask arrived on, if still held. Neither: weather if a
+// road was tried and broke, no road if none could be, reported apart, and the
+// number was spent on this side alone.
 package host
 
 import (
@@ -248,33 +249,43 @@ func (h *Host) Arrived(padlock [32]byte, via any) {
 	})
 }
 
-// Send is delivery's three rules and no more.
-func (h *Host) Send(row warden.Row, message []byte) ([]byte, bool) {
+// Send is delivery's three rules and no more. A hint of a scheme this host
+// cannot speak is walked past and never counted: nothing was sent down it, so
+// it is not a road that failed, and it is never reported as the fault when a
+// later road turns out to be weather.
+func (h *Host) Send(row warden.Row, message []byte) ([]byte, bool, error) {
+	tried := []string{}
+	var last error
 	for _, hint := range row.Hints {
 		switch {
 		case strings.HasPrefix(hint, "mem://"):
+			tried = append(tried, hint)
 			far, ok := grounds.Load(hint)
 			if !ok {
 				continue
 			}
-			return far.(*warden.Warden).Arrive(message, nil), false
+			return far.(*warden.Warden).Arrive(message, nil), false, nil
 
 		case strings.HasPrefix(hint, "http://"), strings.HasPrefix(hint, "https://"):
+			tried = append(tried, hint)
 			back, err := carriage.Caller{}.Send([]string{hint}, message)
 			if err != nil {
 				// Weather on this road; the next may carry.
+				last = err
 				continue
 			}
-			return back, false
+			return back, false, nil
 
 		case line.Speaks(hint):
+			tried = append(tried, hint)
 			l := h.dial(hint)
 			if l == nil {
 				continue
 			}
-			// The answer arrives as a frame of its own, through the door.
+			// The answer arrives as a frame of its own, through the door. A
+			// line that would not take the frame carried nothing.
 			if l.Carry(message) {
-				return nil, true
+				return nil, true, nil
 			}
 			continue
 		}
@@ -284,11 +295,16 @@ func (h *Host) Send(row warden.Row, message []byte) ([]byte, bool) {
 	h.mu.Lock()
 	back := h.byPadlock[row.Padlock]
 	h.mu.Unlock()
-	if back != nil && back.Open() && back.Carry(message) {
-		return nil, true
+	if back != nil && back.Open() {
+		tried = append(tried, "the line this padlock last asked on")
+		if back.Carry(message) {
+			return nil, true, nil
+		}
 	}
-	// Weather, and the number was spent.
-	return nil, false
+	if len(tried) == 0 {
+		return nil, false, &warden.NoRoad{Hints: row.Hints}
+	}
+	return nil, false, &warden.Weather{Tried: tried, Cause: last}
 }
 
 func (h *Host) dial(hint string) *line.Line {

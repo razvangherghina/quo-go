@@ -239,9 +239,16 @@ func (h *remoteHandle) Send(ctx context.Context, sealed *Sealed) (any, bool) {
 	if !ok {
 		return nil, false
 	}
-	answer := h.w.carry(ctx, h.row, sealed)
+	// A handle keeps its shape whatever the road did — a value or nothing —
+	// because a being's code pushing at a peer that went away is not in error.
+	// What weather changes is inward: the ground's observer was told the road's
+	// fault, and the handle does not go asking whether the being moved, that
+	// question needing the very road that just failed.
+	answer, weathered := h.w.carry(ctx, h.row, sealed)
 	if answer == nil {
-		h.rehouse(ctx)
+		if !weathered {
+			h.rehouse(ctx)
+		}
 		return nil, false
 	}
 	if f.Answer == nil {
@@ -367,11 +374,11 @@ func (h *remoteHandle) Limit(ctx context.Context) (int64, bool) {
 // handed to delivery, and whatever comes back through the warden's one door.
 // The lock is not held across either, because a judgment on this ground may
 // itself be what answers.
-func (w *Warden) carry(ctx context.Context, row *outbound, sealed *Sealed) *envelope.Answer {
+func (w *Warden) carry(ctx context.Context, row *outbound, sealed *Sealed) (*envelope.Answer, bool) {
 	w.mu.Lock()
 	if w.delivery == nil {
 		w.mu.Unlock()
-		return nil
+		return nil, false
 	}
 	// An ask resent after silence is awaiting again under the number it always
 	// spent; a fresh one is already awaiting from the sealing.
@@ -380,18 +387,23 @@ func (w *Warden) carry(ctx context.Context, row *outbound, sealed *Sealed) *enve
 	delivery := w.delivery
 	w.mu.Unlock()
 
-	back, later := delivery.Send(view, sealed.envelope)
+	back, later, fault := delivery.Send(view, sealed.envelope)
 	switch {
+	case fault != nil:
+		// Weather. Nothing left this ground, so the number is spent here
+		// alone, and the house is told which road it was.
+		w.roadFault(row, sealed.seq, sealed.padlock, fault)
+		return nil, true
 	case back != nil:
 		// A road that answered in its own response: the bytes go in the one
 		// entry point like anything else, and settle the ask there.
 		w.Arrive(back, nil)
 	case !later:
-		// Weather. The number stays spent, because a message the far door
-		// judged spent it there whatever this end does with its own record.
+		// The number stays spent, because a message the far door judged spent
+		// it there whatever this end does with its own record.
 		w.forgoAt(row, sealed.seq, sealed.padlock)
 	}
-	return waitFor(ctx, waiting, sealed.deadline)
+	return waitFor(ctx, waiting, sealed.deadline), false
 }
 
 // waitFor is the caller's own deadline: the allowance it sent, in the

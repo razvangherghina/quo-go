@@ -186,6 +186,10 @@ type Arming struct {
 //
 // Reason names the step the judgment refused at. Being and Method are the
 // address the message carried, when it carried one.
+//
+// It is also how the house learns that an ask it sent never left the ground:
+// Reason is then *Weather or *NoRoad, which errors.As reads apart, and no door
+// spoke at all.
 type Silence struct {
 	Reason error
 	Being  *[32]byte
@@ -1475,26 +1479,23 @@ func (w *Warden) Accept(ctx context.Context, inv wire.Invitation, a Accepting) (
 		w.mu.Unlock()
 	}
 
-	step := func(being *[32]byte, method *envelope.Method, next *[32]byte) *envelope.Answer {
-		return w.exchange(ctx, rel, Reach{
+	step := func(next *[32]byte) *envelope.Answer {
+		return w.rotate(ctx, rel, Reach{
 			Far:       inv.Warden,
-			Being:     being,
-			Method:    method,
 			Allowance: allowance,
 			Padlock:   a.Padlock,
 			Hints:     hints,
-			NextHeir:  next,
-		})
+		}, next)
 	}
 
 	// Both rotations open the count at one, because each starts the far door's
 	// mark fresh. The first is spent and settled before the second is composed,
 	// so the two never await under the same padlock, warden and number at once.
-	if first := step(nil, nil, &voiceSecret); first == nil {
+	if first := step(&voiceSecret); first == nil {
 		abandon()
 		return nil, errors.New("warden: the far door did not answer the first rotation")
 	}
-	second := step(nil, nil, &heirSecret)
+	second := step(&heirSecret)
 	if second == nil {
 		abandon()
 		return nil, errors.New("warden: the far door did not answer the second rotation")
@@ -1691,7 +1692,7 @@ func (w *Warden) atFar(ctx context.Context, rel *outbound, field string, arg any
 		}
 		m.Args = blob
 	}
-	answer := w.exchange(ctx, rel, Reach{Far: rel.warden, Method: &m, Allowance: allowance})
+	answer, _ := w.exchange(ctx, rel, Reach{Far: rel.warden, Method: &m, Allowance: allowance})
 	if answer == nil || answer.Data == nil {
 		return nil, false
 	}
@@ -1723,26 +1724,102 @@ func (w *Warden) introspect(ctx context.Context, rel *outbound, field string, ar
 // exchange is one composed message put on its road and the answer waited for.
 // The lock is not held across delivery, because a judgment on this ground may
 // itself be what answers.
-func (w *Warden) exchange(ctx context.Context, rel *outbound, r Reach) *envelope.Answer {
+//
+// Three outcomes, kept apart because the caller's next move differs: the
+// answer, nil for the far door's silence, and nil with weathered true when no
+// road carried the bytes — the far door never heard, so nothing there moved.
+func (w *Warden) exchange(ctx context.Context, rel *outbound, r Reach) (answer *envelope.Answer, weathered bool) {
 	w.mu.Lock()
 	message, seq, padlock, err := w.compose(rel, r)
 	if err != nil {
 		w.mu.Unlock()
-		return nil
+		return nil, false
 	}
 	waiting := w.await(rel, seq, padlock)
 	view := Row{Padlock: rel.padlock, Hints: slices.Clone(rel.hints)}
 	delivery, deadline := w.delivery, r.Allowance.Time
 	w.mu.Unlock()
 
-	back, later := delivery.Send(view, message)
+	back, later, fault := delivery.Send(view, message)
 	switch {
+	case fault != nil:
+		w.roadFault(rel, seq, padlock, fault)
+		return nil, true
 	case back != nil:
 		w.Arrive(back, nil)
 	case !later:
 		w.forgoAt(rel, seq, padlock)
 	}
-	return waitFor(ctx, waiting, deadline)
+	return waitFor(ctx, waiting, deadline), false
+}
+
+// roadFault is weather reported inward. The road's fault is not the far door's
+// silence and is never made to look like it: the ask is forgone, and the house
+// that sent it is told which it was — a road that broke, with the roads tried,
+// or no road at all, with the hints nobody here could speak. Nothing outward
+// changes, because nothing outward happened.
+func (w *Warden) roadFault(rel *outbound, seq int64, padlock [32]byte, fault error) {
+	w.forgoAt(rel, seq, padlock)
+	w.mu.Lock()
+	observer := w.observer
+	w.mu.Unlock()
+	if observer == nil {
+		return
+	}
+	contained(func() { observer(Silence{Reason: fault}) })
+}
+
+// rotate is one rotate-and-ask with the recovery Article VIII names, which is
+// the whole of why an accept does not simply give up on a silence.
+//
+// The trap is in where the refusal falls: the rotation lands at step 4 and the
+// number is judged at step 5 (Article XII), so a silence back may mean the
+// takeover already happened. The standing then stands on the key that signed,
+// and sending the rotation again would present a standing's current holder as
+// its own heir — a plain ask carrying a commitment, refused by Article XI now
+// and every time after, with the granter's own key still live at the far door.
+//
+// So the recovery is the one the law names: ask again on the new voice. A
+// plain ask at the number after the rotation's. Answered, the takeover had
+// landed and the describe is the proof. Silent, it had not — a voice still
+// matching the heir commitment and carrying no fresh one is refused — so the
+// row is put back as it was and the rotation itself goes once more, at the
+// number after that. Three sends, then the kit stops guessing.
+//
+// Weather is never tried again from here: the far door never heard, nothing
+// there moved, and the caller retries with exactly what it holds.
+func (w *Warden) rotate(ctx context.Context, rel *outbound, r Reach, next *[32]byte) *envelope.Answer {
+	w.mu.Lock()
+	voice, voiceSecret, heirSecret, spent := rel.voice, rel.voiceSecret, rel.heirSecret, rel.next
+	w.mu.Unlock()
+
+	rotation := r
+	rotation.NextHeir = next
+	answer, weathered := w.exchange(ctx, rel, rotation)
+	if answer != nil || weathered {
+		return answer
+	}
+
+	// The plain ask on the voice the rotation may have installed. Composing it
+	// needs nothing said: the row already stands on that voice, having moved
+	// when the envelope was made.
+	plain := r
+	two := int64(2)
+	plain.Seq = &two
+	if answer, weathered = w.exchange(ctx, rel, plain); answer != nil || weathered {
+		return answer
+	}
+
+	// It had not landed. The identical rotation goes again, which means the
+	// same key signing and the same commitment — so the row goes back to what
+	// it was before the first send, and only the number rises.
+	w.mu.Lock()
+	rel.voice, rel.voiceSecret, rel.heirSecret, rel.next = voice, voiceSecret, heirSecret, spent
+	w.mu.Unlock()
+	three := int64(3)
+	rotation.Seq = &three
+	answer, _ = w.exchange(ctx, rel, rotation)
+	return answer
 }
 
 // forgoAt is Forgo on a row the caller already holds.
