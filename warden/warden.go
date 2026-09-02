@@ -1,42 +1,18 @@
 package warden
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"maps"
 	"slices"
+	"sync"
 
 	"quo.systems/kit/arithmetic"
 	"quo.systems/kit/envelope"
 	"quo.systems/kit/notation"
 	"quo.systems/kit/wire"
 )
-
-// Being is an object a warden holds. A language without reflection cannot look
-// a field up by name, so a Go kit takes the dispatch the object's own author
-// generates: the call goes in, the answer's bytes come out. Surplus in the
-// blob is the being's refusal, never the warden's.
-//
-// A being that merely answers implements this and reads only the method and
-// the args. It never learns it has an address, never judges, and never sees a
-// key.
-type Being interface {
-	Invoke(call Call) ([]byte, error)
-}
-
-// Call is what a being is handed on invocation: the field named on it, its
-// arguments as one opaque blob, and the leash this call may spend onward.
-//
-// The warden is deliberately not here. A being that acts takes a warden the
-// ordinary way any dependency is taken, by its author, on purpose — nothing is
-// ever injected into an object behind its back. What an author cannot hold in
-// advance is the allowance, because it belongs to the message rather than to
-// the being, so that is the one thing the call carries.
-type Call struct {
-	Method string
-	Args   []byte
-	Leash  Leash
-}
 
 // Leash is what one arriving call may hand to the next door. It is not a
 // number the door worked out in advance: the hop count falls by one, and the
@@ -103,6 +79,29 @@ type Founding struct {
 	Limit          int64
 	Window         int64 // zero takes DefaultWindow
 
+	// Random is the host's randomness, handed to the warden at open rather
+	// than to each judgment: an ephemeral sealing key is needed on every
+	// answer and every ask, and a door that had to be given one per message
+	// could not be reached by a road that only knows bytes.
+	Random func() [32]byte
+
+	// Delivery is what the warden hands an envelope and the row it belongs to.
+	// It is the one thing beneath the warden that reads a hint. A warden with
+	// none can still be arrived at; it simply cannot speak first.
+	Delivery Delivery
+
+	// Store is where what must survive a restart lives. Handed none, the
+	// warden keeps its records in memory alone and a restart is a new house.
+	Store Store
+
+	// Allowance is what a walk is born with when a being here starts one of
+	// its own. Zero takes DefaultAllowance.
+	Allowance envelope.Allowance
+
+	// Hints are the roads this door already knows it answers on. A road stood
+	// up later publishes its own.
+	Hints []string
+
 	// Clock reads the host's own clock in milliseconds, which is what the
 	// allowance's time budget is counted in. It is required, because a door
 	// that cannot measure its dwell cannot shrink the leash, and a door that
@@ -119,20 +118,9 @@ type Founding struct {
 	Clock func() int64
 }
 
-// Draws are the randomness one judgment may need: the sealing key for the
-// answer, fresh on every message, and the two keys a receive mints and the
-// origin never saw.
-//
-// A destination mints two (Article IX): Being is the key the arriving being is
-// named by at this house, and Heir is that name's heir. They are two because
-// the answer commits to the first — the being's new name, which is where the
-// migration's second news moves the being's identity — while the second is
-// what lets that name be succeeded afterwards like any other.
-type Draws struct {
-	Ephemeral [32]byte
-	Being     [32]byte
-	Heir      [32]byte
-}
+// DefaultAllowance is what a walk started here is born with when the host says
+// nothing: the warden's own number, which each warden sets for itself.
+var DefaultAllowance = envelope.Allowance{Time: 5000, Hops: 8}
 
 // Maker makes a being of one class from the cells that arrived with it. It is
 // the host's program, so it is the host that writes it: the door mints the
@@ -140,12 +128,13 @@ type Draws struct {
 //
 // An error is the destination refusing the cargo, which reaches the origin as
 // the silence every other refusal does.
-type Maker func(cells []byte) (Being, error)
+type Maker func(cells []byte) (any, error)
 
 // class is a blueprint this house can make a being of: what makes one, and the
 // field names that blueprint declares, read once at registration rather than
 // on every arrival.
 type class struct {
+	bp       *notation.Blueprint
 	make     Maker
 	declares map[string]bool
 }
@@ -160,11 +149,17 @@ type held struct {
 	// under. The secret stays the host's: a departure is handed the heir's key
 	// and this door only ever checks it against the commitment.
 	heir   [32]byte
-	object Being
-	// declares is the blueprint's field names. The blueprint is the scope: a
-	// name it never declared is never reached for on the object at all, so the
-	// door refuses it before the object is touched.
+	object any
+	// bound is the blueprint bound to the object: which method answers each
+	// declared field, and the types either side of it. The blueprint is the
+	// scope, so a name it never declared is never reached for on the object at
+	// all and the door refuses it before the object is touched.
+	bound *bound
+	// declares is the blueprint's field names.
 	declares map[string]bool
+	// quo is the closure this being was handed, held so a release can take it
+	// back and so the being can be found by what it holds.
+	quo *Quo
 }
 
 // armed is a commitment this door will take a standing over for, held at the
@@ -189,8 +184,8 @@ type Arming struct {
 // the house talking to itself, so a blueprint's own layer can log, degrade, or
 // answer its caller a typed refusal.
 //
-// Reason is the same error Judge hands the host, which names the step. Being
-// and Method are the address the message carried, when it carried one.
+// Reason names the step the judgment refused at. Being and Method are the
+// address the message carried, when it carried one.
 type Silence struct {
 	Reason error
 	Being  *[32]byte
@@ -210,6 +205,9 @@ const (
 	// CallerStranger is a voice that stands nowhere, whose describe is served
 	// like any other.
 	CallerStranger CallerKind = "stranger"
+	// CallerLocal is no voice at all: a call from a being under this same
+	// warden, where there are no strangers and nothing was judged.
+	CallerLocal CallerKind = "local"
 )
 
 // Caller is the verified voice, offered inward for the call about to be
@@ -230,7 +228,29 @@ type Warden struct {
 	padlockSecrets [][32]byte // the current one first; keeping the old ones is the host's choice
 	limit          int64
 
-	clock func() int64
+	// Handed in by the host at open, never reached for: the clock, the
+	// randomness, delivery, and the store the records live in.
+	clock     func() int64
+	random    func() [32]byte
+	delivery  Delivery
+	store     Store
+	allowance envelope.Allowance
+
+	// hints are the roads this door answers on. A warden does not know where
+	// it stands until something stands it up, so a road is told to it rather
+	// than fixed at birth, and every mint after that carries what is true then.
+	hints []string
+
+	// labels are the private names beside the rows: a being minted beside
+	// another, or a relation accepted under that label. Nothing resolves a
+	// label but this map, and no label travels.
+	labels map[string]*label
+
+	// mu is the one lock. A warden is reached from several goroutines at once
+	// — a road's reader, a host's own walk, a being answering — and it is
+	// released around every call into a being and every hand to delivery,
+	// because both may reach back in.
+	mu sync.Mutex
 
 	beings     map[[32]byte]*held
 	blueprints map[[32]byte]string
@@ -265,6 +285,27 @@ type Warden struct {
 	consumer func(Caller)
 }
 
+// label is one private name: a being beside this one, or a relation accepted
+// under it. A relation carries a handle per being the standing names, because a
+// standing names beings and one name over the relation is the name a being
+// gives the whole of what it accepted.
+type label struct {
+	local *[32]byte
+	row   *outbound
+	at    []reached
+}
+
+// reached is one being under an accepted relation: what it is, what class it
+// is of, and the handle built from that class's text.
+type reached struct {
+	being  [32]byte
+	digest [32]byte
+	handle Handle
+}
+
+// heard is one answer settling the ask that awaited it.
+type heard struct{ answer envelope.Answer }
+
 // self is the pk of the public being, which is the warden's own name. It is
 // written this way rather than kept in a field because the two can never
 // differ: a separate key would mean a card alone let you reach a door and ask
@@ -285,6 +326,17 @@ func New(f Founding) (*Warden, error) {
 	if window == 0 {
 		window = DefaultWindow
 	}
+	allowance := f.Allowance
+	if allowance.Time == 0 && allowance.Hops == 0 {
+		allowance = DefaultAllowance
+	}
+	random := f.Random
+	if random == nil {
+		// A warden with no randomness can judge nothing: every answer is sealed
+		// under an ephemeral key, and reaching for one here is what taking it
+		// as an argument exists to refuse.
+		return nil, errors.New("warden: a door with no randomness can seal nothing")
+	}
 	w := &Warden{
 		name:           arithmetic.SigningKey(f.NameSecret),
 		nameSecret:     f.NameSecret,
@@ -293,6 +345,12 @@ func New(f Founding) (*Warden, error) {
 		padlockSecrets: [][32]byte{f.PadlockSecret},
 		limit:          f.Limit,
 		clock:          f.Clock,
+		random:         random,
+		delivery:       f.Delivery,
+		store:          f.Store,
+		allowance:      allowance,
+		hints:          slices.Clone(f.Hints),
+		labels:         map[string]*label{},
 		beings:         map[[32]byte]*held{},
 		blueprints:     map[[32]byte]string{},
 		classes:        map[[32]byte]class{},
@@ -315,7 +373,50 @@ func New(f Founding) (*Warden, error) {
 		commitment: f.HeirCommitment,
 		declares:   fieldNames(bp),
 	}
+	// What must survive a restart is read back from the store the host handed
+	// in, before anything is held: the rows find their beings by name as the
+	// host holds them again on the same keys.
+	if w.store != nil {
+		if err := w.restore(); err != nil {
+			return nil, err
+		}
+	}
 	return w, nil
+}
+
+// Publish tells the warden a road it answers on. A warden does not know where
+// it stands until something stands it up: a door on an ephemeral port has no
+// address until it is listening, and a domain is the host's fact. Roads
+// accumulate, because a warden offers as many as it has and none is
+// authoritative; telling it the same road twice adds nothing.
+func (w *Warden) Publish(hints ...string) []string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for _, hint := range hints {
+		if !slices.Contains(w.hints, hint) {
+			w.hints = append(w.hints, hint)
+		}
+	}
+	w.persist()
+	return slices.Clone(w.hints)
+}
+
+// Retract drops a road that has stopped carrying. It is not news on its own:
+// the peers that need to hear it are told by whatever moved the door, and this
+// only stops the dead road being minted into anything new.
+func (w *Warden) Retract(hints ...string) []string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.hints = slices.DeleteFunc(w.hints, func(hint string) bool { return slices.Contains(hints, hint) })
+	w.persist()
+	return slices.Clone(w.hints)
+}
+
+// Hints are the roads this door currently answers on.
+func (w *Warden) Hints() []string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return slices.Clone(w.hints)
 }
 
 // Name is the warden's signing key: its identity, which never moves without
@@ -374,30 +475,126 @@ func (w *Warden) Succeed(nameSecret, heirCommitment [32]byte) error {
 	return nil
 }
 
+// Holding is what a hold needs besides the object: the blueprint that is its
+// bound surface, the keys it is minted from — drawn from the warden's own
+// randomness when none are given — and a private label to reach it by later.
+type Holding struct {
+	Blueprint string
+	Keys      Keys
+	Label     string
+}
+
 // Hold takes an ordinary object and makes it a being: the warden mints its
-// keys and records the pointer and the blueprint's digest. Nobody is told,
-// because no one stands at it yet.
-func (w *Warden) Hold(blueprint string, object Being, keys Keys) ([32]byte, error) {
-	bp, err := notation.Parse(blueprint)
+// keys, binds the blueprint to the object's methods, and records the pointer
+// and the digest. Nobody is told, because no one stands at it yet.
+//
+// The object is a plain Go value and stays one. What it gains is the closure —
+// when it embeds Attach — and a codec: its declared methods are called with
+// decoded arguments and answer plain values, which the warden encodes by the
+// field's declared answer type. The being never sees a byte.
+func (w *Warden) Hold(object any, h Holding) ([32]byte, Handle, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.hold(object, h)
+}
+
+func (w *Warden) hold(object any, h Holding) ([32]byte, Handle, error) {
+	bp, err := notation.Parse(h.Blueprint)
 	if err != nil {
-		return [32]byte{}, err
+		return [32]byte{}, nil, err
+	}
+	keys := h.Keys
+	if keys.Secret == ([32]byte{}) {
+		keys.Secret = w.random()
+	}
+	if keys.HeirSecret == ([32]byte{}) {
+		keys.HeirSecret = w.random()
 	}
 	pk := arithmetic.SigningKey(keys.Secret)
 	if _, taken := w.beings[pk]; taken {
-		return pk, errors.New("warden: that key already names a being")
+		return pk, nil, errors.New("warden: that key already names a being")
+	}
+	// The binding is checked here rather than at the door: a class whose
+	// blueprint declares a field its object cannot answer is refused before the
+	// being is addressable.
+	b, err := bind(bp, object)
+	if err != nil {
+		return [32]byte{}, nil, err
 	}
 	digest := bp.Digest()
 	w.blueprints[digest] = bp.Text()
-	w.beings[pk] = &held{
+	one := &held{
 		pk:         pk,
 		secret:     keys.Secret,
 		digest:     digest,
 		commitment: arithmetic.Commit(w.name, arithmetic.SigningKey(keys.HeirSecret)),
 		heir:       arithmetic.SigningKey(keys.HeirSecret),
 		object:     object,
+		bound:      b,
 		declares:   fieldNames(bp),
 	}
-	return pk, nil
+	one.quo = &Quo{w: w, being: pk}
+	w.beings[pk] = one
+	if a, ok := object.(attaching); ok {
+		a.attach(one.quo)
+	}
+	if h.Label != "" {
+		at := pk
+		w.labels[h.Label] = &label{local: &at}
+	}
+	w.persist()
+	return pk, &localHandle{w: w, being: pk}, nil
+}
+
+// Relation is a handle by its private label: a being minted beside another, or
+// a relation accepted under that label. Nothing resolves a label but this map,
+// and no label travels.
+//
+// A standing may name several beings, and this answers the first of them in the
+// estate's own derived order. Relations answers all of them.
+func (w *Warden) Relation(name string) Handle {
+	held := w.Relations(name)
+	if len(held) == 0 {
+		return nil
+	}
+	return held[0]
+}
+
+// Relations is every handle under one private label.
+func (w *Warden) Relations(name string) []Handle {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	kept, ok := w.labels[name]
+	if !ok {
+		return nil
+	}
+	if kept.local != nil {
+		if _, held := w.beings[*kept.local]; !held {
+			return nil
+		}
+		return []Handle{&localHandle{w: w, being: *kept.local}}
+	}
+	out := make([]Handle, 0, len(kept.at))
+	for _, one := range kept.at {
+		out = append(out, one.handle)
+	}
+	return out
+}
+
+// Amend adds beings to a voice's standing or takes them away. A standing is
+// amended, not replaced, and taking the last being away is release.
+func (w *Warden) Amend(voice [32]byte, add, remove [][32]byte) error {
+	for _, being := range add {
+		if err := w.Widen(voice, being); err != nil {
+			return err
+		}
+	}
+	for _, being := range remove {
+		if err := w.Narrow(voice, being); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Welcome says this house can make a being of one class, and how. It is what a
@@ -424,7 +621,7 @@ func (w *Warden) Welcome(blueprint string, make Maker) ([32]byte, error) {
 	}
 	digest := bp.Digest()
 	w.blueprints[digest] = bp.Text()
-	w.classes[digest] = class{make: make, declares: fieldNames(bp)}
+	w.classes[digest] = class{bp: bp, make: make, declares: fieldNames(bp)}
 	return digest, nil
 }
 
@@ -448,6 +645,8 @@ func fieldNames(bp *notation.Blueprint) map[string]bool {
 // warden holding the one key that can take the standing over — in the same
 // breath as every key it held is said to be dead.
 func (w *Warden) Release(being [32]byte) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	delete(w.beings, being)
 	for voice, row := range w.record.in {
 		delete(row.beings, being)
@@ -455,7 +654,13 @@ func (w *Warden) Release(being [32]byte) {
 			delete(w.record.in, voice)
 		}
 	}
-	w.Forget(being, nil)
+	for name, kept := range w.labels {
+		if kept.local != nil && *kept.local == being {
+			delete(w.labels, name)
+		}
+	}
+	w.forget(being, nil)
+	w.persist()
 }
 
 // Grant mints a voice, writes the inbound row, and hands back the invitation.
@@ -464,7 +669,25 @@ func (w *Warden) Release(being [32]byte) {
 // What leaves is the heir keypair, never the voice's own: whoever minted a
 // voice has seen its keys, so the holder's first act is a rotate-and-ask to a
 // key nobody else has ever seen.
-func (w *Warden) Grant(being [32]byte, voice Keys, padlock [32]byte, hints []string) (wire.Invitation, error) {
+// The voice's keys are drawn from the warden's own randomness, and the lock
+// and the roads are the ones this door currently holds. A grant names the
+// being it opens, and nothing else about this house.
+func (w *Warden) Grant(being [32]byte) (wire.Invitation, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.grant(being, Keys{Secret: w.random(), HeirSecret: w.random()}, w.padlock, w.hints)
+}
+
+// GrantAs is Grant with the voice's keys, the return lock and the roads named
+// by the caller. Which lock a peer seals to is the caller's own choice and the
+// whole of what it can do about being linked across doors.
+func (w *Warden) GrantAs(being [32]byte, voice Keys, padlock [32]byte, hints []string) (wire.Invitation, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.grant(being, voice, padlock, hints)
+}
+
+func (w *Warden) grant(being [32]byte, voice Keys, padlock [32]byte, hints []string) (wire.Invitation, error) {
 	if _, ok := w.beings[being]; !ok {
 		return wire.Invitation{}, errors.New("warden: no being of that name")
 	}
@@ -480,6 +703,7 @@ func (w *Warden) Grant(being [32]byte, voice Keys, padlock [32]byte, hints []str
 		beings:     map[[32]byte]bool{being: true},
 		spent:      map[int64]bool{},
 	}
+	w.persist()
 	return wire.Invitation{
 		Warden:     w.name,
 		Commitment: w.heirCommitment,
@@ -510,10 +734,6 @@ func (w *Warden) Arm(commitment [32]byte, a Arming) {
 	w.arms = append(w.arms, armed{commitment: commitment, name: name, beings: slices.Clone(a.Beings)})
 }
 
-// Armed is how many commitments this door is currently holding a claim open
-// for, so a host can see an arm was spent without reaching into the record.
-func (w *Warden) Armed() int { return len(w.arms) }
-
 // Forget drops the relations a being holds outward. `at` narrows it to the
 // relations that being holds at one far warden, named by that warden's own
 // key — which is how a relation re-remembered at a house supersedes the one it
@@ -521,14 +741,20 @@ func (w *Warden) Armed() int { return len(w.arms) }
 // which is what a being leaving takes with it. It answers how many rows it
 // dropped.
 func (w *Warden) Forget(being [32]byte, at *[32]byte) int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.forget(being, at)
+}
+
+func (w *Warden) forget(being [32]byte, at *[32]byte) int {
 	dropped := 0
-	for far, rel := range w.record.out {
+	w.record.out = slices.DeleteFunc(w.record.out, func(rel *outbound) bool {
 		if rel.holder != being || (at != nil && rel.warden != *at) {
-			continue
+			return false
 		}
-		delete(w.record.out, far)
 		dropped++
-	}
+		return true
+	})
 	return dropped
 }
 
@@ -541,6 +767,8 @@ func (w *Warden) Forget(being [32]byte, at *[32]byte) int {
 // The order is by voice ascending, chosen rather than derived, so a host reads
 // the same list twice.
 func (w *Warden) Standings(being [32]byte) [][32]byte {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	holders := [][32]byte{}
 	for _, row := range w.record.in {
 		if row.beings[being] {
@@ -616,6 +844,9 @@ func contained(hook func()) {
 // nobody is told, no secret is minted, and the holder simply finds more the
 // next time it describes.
 func (w *Warden) Widen(voice, being [32]byte) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	defer w.persist()
 	row, ok := w.record.in[voice]
 	if !ok {
 		return errors.New("warden: that voice stands nowhere here")
@@ -630,6 +861,9 @@ func (w *Warden) Widen(voice, being [32]byte) error {
 // Narrow takes a being away. Taking the last one away is release, and there is
 // no separate act for it.
 func (w *Warden) Narrow(voice, being [32]byte) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	defer w.persist()
 	row, ok := w.record.in[voice]
 	if !ok {
 		return errors.New("warden: that voice stands nowhere here")
@@ -651,7 +885,13 @@ func (w *Warden) Narrow(voice, being [32]byte) error {
 // that dropped it would stand at a house it could never rotate at, and a
 // cargo packed off it would carry an heir nobody holds.
 func (w *Warden) Stand(holder [32]byte, inv wire.Invitation, voiceSecret [32]byte) {
-	w.record.out[inv.Warden] = &outbound{
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.stand(holder, inv, voiceSecret)
+}
+
+func (w *Warden) stand(holder [32]byte, inv wire.Invitation, voiceSecret [32]byte) *outbound {
+	rel := &outbound{
 		holder:      holder,
 		warden:      inv.Warden,
 		commitment:  inv.Commitment,
@@ -662,33 +902,41 @@ func (w *Warden) Stand(holder [32]byte, inv wire.Invitation, voiceSecret [32]byt
 		hints:       slices.Clone(inv.Hints),
 		spent:       map[int64]bool{},
 		beings:      map[[32]byte][32]byte{},
-		awaiting:    map[await]bool{},
+		awaiting:    map[await]chan *heard{},
 	}
+	w.record.out = append(w.record.out, rel)
+	w.persist()
+	return rel
 }
 
 // Learn records the heir commitment of a being this ground stands at, as a
 // describe handed it over. Without it a peer holds no material to believe that
 // being's succession.
 func (w *Warden) Learn(far, being, commitment [32]byte) error {
-	rel, ok := w.record.out[far]
-	if !ok {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	defer w.persist()
+	rel := w.record.at(far, nil)
+	if rel == nil {
 		return errors.New("warden: no relation with that house")
 	}
 	rel.beings[being] = commitment
 	return nil
 }
 
-// Relation reads back an outbound row: the far warden's name, its heir
+// RelationAt reads back an outbound row: the far warden's name, its heir
 // commitment, the padlock and the hints.
-func (w *Warden) Relation(far [32]byte) (name, commitment, padlock [32]byte, hints []string, ok bool) {
-	rel, ok := w.record.out[far]
-	if !ok {
+func (w *Warden) RelationAt(far [32]byte) (name, commitment, padlock [32]byte, hints []string, ok bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	rel := w.record.at(far, nil)
+	if rel == nil {
 		return
 	}
 	return rel.warden, rel.commitment, rel.padlock, slices.Clone(rel.hints), true
 }
 
-// Publish records the succession this door published for a name, so the door
+// Point records the succession this door published for a name, so the door
 // can point every arriving ask at where the being went.
 //
 // The name need not be a being here, and a door that required one could not
@@ -696,7 +944,7 @@ func (w *Warden) Relation(far [32]byte) (name, commitment, padlock [32]byte, hin
 // the name the arriving being wore before, and that name is a being at no door
 // any more. Both halves of a migration publish the identical word, so a peer
 // that asks either house learns the same thing.
-func (w *Warden) Publish(being [32]byte, word Word) {
+func (w *Warden) Point(being [32]byte, word Word) {
 	w.moved[being] = word
 }
 
@@ -787,7 +1035,7 @@ func (w *Warden) Depart(being [32]byte, d Departing) (Departed, error) {
 	w.Forget(being, nil)
 	// The pointer stays and answers `moved` alone: every other ask meets
 	// silence, and a peer that never asks `moved` learns by the news below.
-	w.Publish(being, word)
+	w.Point(being, word)
 	return Departed{Word: word, Voice: successor, VoiceSecret: d.HeirSecret, Peers: told}, nil
 }
 
@@ -830,7 +1078,7 @@ func (w *Warden) Landed(hints []string) (Arrival, bool) {
 	a := *w.arrived
 	a.Word.Hints = slices.Clone(hints)
 	w.arrived.Word = a.Word
-	w.Publish(*a.Word.Being, a.Word)
+	w.Point(*a.Word.Being, a.Word)
 
 	// The rows that came with the cargo, and only those: a standing granted
 	// here since the being landed was never told the being moved, because it
@@ -876,7 +1124,10 @@ type Tell struct {
 //
 // News names no being: the voice is placed in the outbound record, and that is
 // the whole of what makes it news.
-func (w *Warden) News(ephemeral [32]byte, t Tell) ([]byte, error) {
+func (w *Warden) News(t Tell) ([]byte, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	ephemeral := w.random()
 	// An inbound row keeps the padlock the peer named and never that peer's
 	// warden name — a door never learns the house behind a voice — so the
 	// recipient is the padlock. A padlock is per door, so it binds the message
@@ -998,8 +1249,12 @@ func (w *Warden) Pack(being [32]byte, cells []byte) (Cargo, error) {
 // being never touches a key: it hands the warden a handle, and the warden
 // signs, seals and carries.
 type Reach struct {
-	// Far is the house, by the name the outbound record is keyed on.
+	// Far is the house this relation stands at.
 	Far [32]byte
+	// Holder narrows it to the relation one of this ground's beings spends,
+	// for the ordinary case where two of them stand at the same house. Absent,
+	// the first relation with that house is taken.
+	Holder *[32]byte
 	// Being is the pk addressed, or absent to speak to the ground's own
 	// affairs. Method is the field named on it, or absent for a describe.
 	Being  *[32]byte
@@ -1039,23 +1294,37 @@ type Reach struct {
 }
 
 // Ask composes one utterance and hands back the sealed bytes and the number it
-// spent. Nothing here delivers: what to do with the bytes is the carriage's,
-// and whether they arrive is the weather.
-func (w *Warden) Ask(ephemeral [32]byte, r Reach) ([]byte, int64, error) {
-	rel, ok := w.record.out[r.Far]
-	if !ok {
-		return nil, 0, errors.New("warden: no relation with that house")
+// spent. Nothing here delivers: what to do with the bytes is delivery's, and
+// whether they arrive is the weather.
+func (w *Warden) Ask(r Reach) ([]byte, int64, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	message, seq, _, err := w.ask(r)
+	return message, seq, err
+}
+
+// ask is Ask with the return lock handed back too, because the caller needs
+// all three to await the answer and to forgo it.
+func (w *Warden) ask(r Reach) ([]byte, int64, [32]byte, error) {
+	return w.compose(w.record.at(r.Far, r.Holder), r)
+}
+
+func (w *Warden) compose(rel *outbound, r Reach) ([]byte, int64, [32]byte, error) {
+	ephemeral := w.random()
+	var none [32]byte
+	if rel == nil {
+		return nil, 0, none, errors.New("warden: no relation with that house")
 	}
 	allowance := r.Allowance
 	if r.Leash != nil {
 		onward, err := r.Leash.Onward()
 		if err != nil {
-			return nil, 0, err
+			return nil, 0, none, err
 		}
 		allowance = onward
 	}
 	if allowance.Time < 1 || allowance.Hops < 0 {
-		return nil, 0, errors.New("warden: a call with no leash left")
+		return nil, 0, none, errors.New("warden: a call with no leash left")
 	}
 	padlock := r.Padlock
 	if padlock == ([32]byte{}) {
@@ -1075,7 +1344,7 @@ func (w *Warden) Ask(ephemeral [32]byte, r Reach) ([]byte, int64, error) {
 		// its own heir. On the first rotation the two are one key, because an
 		// invitation hands the same key out as both.
 		if rel.heirSecret == ([32]byte{}) {
-			return nil, 0, errors.New("warden: a relation with no heir cannot rotate")
+			return nil, 0, padlock, errors.New("warden: a relation with no heir cannot rotate")
 		}
 		voiceSecret = rel.heirSecret
 		voice = arithmetic.SigningKey(rel.heirSecret)
@@ -1093,7 +1362,7 @@ func (w *Warden) Ask(ephemeral [32]byte, r Reach) ([]byte, int64, error) {
 	seq := next + 1
 	if r.Seq != nil {
 		if *r.Seq <= next {
-			return nil, 0, errors.New("warden: a number this relation has already spent")
+			return nil, 0, padlock, errors.New("warden: a number this relation has already spent")
 		}
 		seq = *r.Seq
 	}
@@ -1103,8 +1372,8 @@ func (w *Warden) Ask(ephemeral [32]byte, r Reach) ([]byte, int64, error) {
 	// be answered indistinguishably, so this kit refuses to send the second —
 	// which is the shape a rotation makes, because it starts the count over.
 	pending := await{seq: seq, padlock: padlock}
-	if rel.awaiting[pending] {
-		return nil, 0, errors.New("warden: an ask on that number is already awaiting an answer")
+	if _, waiting := rel.awaiting[pending]; waiting {
+		return nil, 0, padlock, errors.New("warden: an ask on that number is already awaiting an answer")
 	}
 
 	say := envelope.Say{
@@ -1120,12 +1389,14 @@ func (w *Warden) Ask(ephemeral [32]byte, r Reach) ([]byte, int64, error) {
 	}
 	message, err := envelope.SealSay(ephemeral, rel.padlock, voiceSecret, say)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, padlock, err
 	}
 	if rel.awaiting == nil {
-		rel.awaiting = map[await]bool{}
+		rel.awaiting = map[await]chan *heard{}
 	}
-	rel.awaiting[pending] = true
+	// One value ever passes, and the buffer is what lets the door settle an
+	// answer whether or not anybody is still listening for it.
+	rel.awaiting[pending] = make(chan *heard, 1)
 	// There is an envelope: the number is spent and the row moves with it.
 	rel.voice, rel.voiceSecret, rel.next = voice, voiceSecret, say.Seq
 	if r.NextHeir != nil {
@@ -1134,114 +1405,360 @@ func (w *Warden) Ask(ephemeral [32]byte, r Reach) ([]byte, int64, error) {
 		// because nothing else in Quo does.
 		rel.heirSecret = *r.NextHeir
 	}
-	return message, say.Seq, nil
+	w.persist()
+	return message, say.Seq, padlock, nil
 }
 
-// Accepting is what spending an invitation whole needs: the being of this
-// ground that will hold the relation, the two keys nobody has ever seen, the
-// ask to carry, and the road to carry it on.
-//
-// Ephemeral holds the two sealing keys the two messages need, drawn by the
-// host like every other draw. Send is the road: one envelope out, the sealed
-// answer back, and an error only where the road itself failed to carry.
-type Accepting struct {
-	Holder      [32]byte
-	VoiceSecret [32]byte
-	HeirSecret  [32]byte
+// await marks an ask as awaiting again, for a caller resending the identical
+// envelope after silence. The number stays what it was, and the far door
+// honours those bytes at most once whatever this end does.
+func (w *Warden) await(rel *outbound, seq int64, padlock [32]byte) chan *heard {
+	pending := await{seq: seq, padlock: padlock}
+	if waiting, ok := rel.awaiting[pending]; ok {
+		return waiting
+	}
+	waiting := make(chan *heard, 1)
+	rel.awaiting[pending] = waiting
+	return waiting
+}
 
-	Being     *[32]byte
-	Method    *envelope.Method
-	Allowance envelope.Allowance
+// Accepting is what spending an invitation whole needs besides the invitation:
+// the being of this ground that will hold the relation, the private label to
+// reach it by, and the return lock and roads this caller wants answers on.
+//
+// A relation nobody here owns belongs to the warden itself and travels
+// nowhere, which is what a zero Holder means.
+type Accepting struct {
+	Holder    [32]byte
+	Label     string
 	Padlock   [32]byte
 	Hints     []string
-
-	Ephemeral [2][32]byte
-	Send      func(message []byte) ([]byte, error)
+	Allowance envelope.Allowance
 }
 
-// Accepted is what the caller keeps: the house it now stands at, the voice it
-// stands on, the heir it committed to and that commitment, the two messages it
-// sent, and the sealed answer to the ask it carried.
-type Accepted struct {
-	Far        [32]byte
-	Voice      [32]byte
-	Heir       [32]byte
-	Commitment [32]byte
-	Opening    []byte
-	Envelope   []byte
-	Answer     []byte
-	Seq        int64
-}
-
-// Accept spends an invitation whole. An invitation is spent, not held: whoever
-// minted the voice has seen its keys and its heirs, so until the holder stands
-// on a key it generated itself, the granter can still speak as the holder at
-// its own door.
+// Accept spends an invitation whole and hands back a handle. An invitation is
+// spent, not held: whoever minted the voice has seen its keys and its heirs, so
+// until the holder stands on a key it generated itself, the granter can still
+// speak as the holder at its own door.
 //
 // That takes two rotate-and-asks, and forgetting the second is the mistake this
-// helper exists to make unmakeable. The first is signed by the invitation's
-// heir — the only key the granting door takes the standing over for — and
-// commits to a fresh voice nobody else has seen. The second is signed by that
-// voice, commits to a fresh heir, and carries the caller's own ask. After it,
+// does inside so that it cannot be forgotten. The first is signed by the
+// invitation's heir — the only key the granting door takes the standing over
+// for — and commits to a fresh voice nobody else has seen. The second is signed
+// by that voice, commits to a fresh heir, and describes the estate. After it,
 // every key the granter ever held for this standing is dead.
 //
-// Nothing here is wire. It is the raw path composed, and the raw path stays
-// open: Stand and Ask do exactly this for a caller that wants the steps.
-func (w *Warden) Accept(inv wire.Invitation, a Accepting) (Accepted, error) {
-	if a.Send == nil {
-		return Accepted{}, errors.New("warden: accepting an invitation needs a road")
+// Then every being the standing opens is found in that estate, each class's
+// blueprint is fetched by digest, and a handle is built per being from the
+// text. What comes back is what a being calls.
+func (w *Warden) Accept(ctx context.Context, inv wire.Invitation, a Accepting) ([]Handle, error) {
+	w.mu.Lock()
+	if w.delivery == nil {
+		w.mu.Unlock()
+		return nil, errors.New("warden: accepting an invitation needs a road")
 	}
-	w.Stand(a.Holder, inv, inv.HeirSecret)
+	allowance := a.Allowance
+	if allowance.Time == 0 && allowance.Hops == 0 {
+		allowance = w.allowance
+	}
+	hints := a.Hints
+	if hints == nil {
+		hints = slices.Clone(w.hints)
+	}
+	voiceSecret, heirSecret := w.random(), w.random()
+	rel := w.stand(a.Holder, inv, inv.HeirSecret)
+	w.mu.Unlock()
 
-	voice := a.VoiceSecret
-	first, _, err := w.Ask(a.Ephemeral[0], Reach{
-		Far:       inv.Warden,
-		Allowance: a.Allowance,
-		Padlock:   a.Padlock,
-		Hints:     a.Hints,
-		NextHeir:  &voice,
-	})
-	if err != nil {
-		return Accepted{}, err
+	abandon := func() {
+		w.mu.Lock()
+		w.record.out = slices.DeleteFunc(w.record.out, func(one *outbound) bool { return one == rel })
+		w.mu.Unlock()
 	}
-	opening, err := a.Send(first)
-	if err != nil {
-		return Accepted{}, err
+
+	step := func(being *[32]byte, method *envelope.Method, next *[32]byte) *envelope.Answer {
+		return w.exchange(ctx, rel, Reach{
+			Far:       inv.Warden,
+			Being:     being,
+			Method:    method,
+			Allowance: allowance,
+			Padlock:   a.Padlock,
+			Hints:     hints,
+			NextHeir:  next,
+		})
 	}
+
 	// Both rotations open the count at one, because each starts the far door's
-	// mark fresh — so the two asks carry the same padlock, warden and seq, and
-	// their answers cannot be told apart. The opening is handed back sealed
-	// for the caller to judge, which is what stops awaiting it here; without
-	// this the second ask would be the one its own kit refuses to send.
-	w.Forgo(inv.Warden, 1, a.Padlock)
+	// mark fresh. The first is spent and settled before the second is composed,
+	// so the two never await under the same padlock, warden and number at once.
+	if first := step(nil, nil, &voiceSecret); first == nil {
+		abandon()
+		return nil, errors.New("warden: the far door did not answer the first rotation")
+	}
+	second := step(nil, nil, &heirSecret)
+	if second == nil {
+		abandon()
+		return nil, errors.New("warden: the far door did not answer the second rotation")
+	}
 
-	heir := a.HeirSecret
-	second, seq, err := w.Ask(a.Ephemeral[1], Reach{
-		Far:       inv.Warden,
-		Being:     a.Being,
-		Method:    a.Method,
-		Allowance: a.Allowance,
-		Padlock:   a.Padlock,
-		Hints:     a.Hints,
-		NextHeir:  &heir,
-	})
+	estate, err := DecodeEstate(second.Data)
 	if err != nil {
-		return Accepted{}, err
+		abandon()
+		return nil, err
 	}
-	answer, err := a.Send(second)
+	at, err := w.harvest(ctx, rel, estate, allowance)
 	if err != nil {
-		return Accepted{}, err
+		abandon()
+		return nil, err
 	}
-	return Accepted{
-		Far:        inv.Warden,
-		Voice:      arithmetic.SigningKey(a.VoiceSecret),
-		Heir:       arithmetic.SigningKey(a.HeirSecret),
-		Commitment: arithmetic.Commit(inv.Warden, arithmetic.SigningKey(a.HeirSecret)),
-		Opening:    opening,
-		Envelope:   second,
-		Answer:     answer,
-		Seq:        seq,
-	}, nil
+	if len(at) == 0 {
+		abandon()
+		return nil, errors.New("warden: that standing opens nothing")
+	}
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if a.Label != "" {
+		w.labels[a.Label] = &label{row: rel, at: at}
+	}
+	w.persist()
+	return handlesOf(at), nil
+}
+
+// Reread asks a far door to describe again and rebuilds the handles under a
+// label. A standing widened after it was accepted is re-read rather than
+// remembered: nobody was told it grew, so the holder finds what was added by
+// asking the door that granted it.
+func (w *Warden) Reread(ctx context.Context, name string) ([]Handle, error) {
+	w.mu.Lock()
+	kept, ok := w.labels[name]
+	if !ok || kept.row == nil {
+		w.mu.Unlock()
+		return nil, errors.New("warden: no relation under that label")
+	}
+	rel := kept.row
+	allowance, err := w.allowanceIn(ctx)
+	w.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+
+	described, ok := w.atFar(ctx, rel, FieldDescribe, nil, allowance)
+	if !ok {
+		return nil, errors.New("warden: the far door did not describe")
+	}
+	estate, err := readEstate(described)
+	if err != nil {
+		return nil, err
+	}
+	at, err := w.harvest(ctx, rel, estate, allowance)
+	if err != nil {
+		return nil, err
+	}
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	// A handle at the far door's own public being is nobody's standing and is
+	// in no estate, so a re-read keeps the one a knock put there rather than
+	// describing it away.
+	var door []reached
+	for _, one := range kept.at {
+		if one.being == rel.warden {
+			door = append(door, one)
+		}
+	}
+	kept.at = append(door, at...)
+	w.persist()
+	return handlesOf(at), nil
+}
+
+// harvest turns an estate a far door described into a handle per being it
+// names. The far door's own public being is not one of them: a standing names
+// beings of that house, and the door itself is what a knock answers with.
+//
+// A describe hands back a commitment per being; a peer that means to believe
+// that being's succession keeps it, because otherwise the news arrives with
+// nothing to hash against.
+func (w *Warden) harvest(ctx context.Context, rel *outbound, estate Estate, allowance envelope.Allowance) ([]reached, error) {
+	var at []reached
+	for _, c := range estate.Order().Classes {
+		var beings []Held
+		for _, one := range c.Beings {
+			if one.Being != rel.warden {
+				beings = append(beings, one)
+			}
+		}
+		if len(beings) == 0 {
+			continue
+		}
+
+		w.mu.Lock()
+		text, known := w.blueprints[c.Digest]
+		w.mu.Unlock()
+		if !known {
+			named, ok := w.atFar(ctx, rel, FieldBlueprint, c.Digest, allowance)
+			if !ok {
+				return nil, errors.New("warden: the far door would not name that class")
+			}
+			if text, ok = named.(string); !ok {
+				return nil, errors.New("warden: the far door named no text for that class")
+			}
+		}
+
+		w.mu.Lock()
+		w.blueprints[c.Digest] = text
+		for _, one := range beings {
+			rel.beings[one.Being] = one.Commitment
+		}
+		w.mu.Unlock()
+
+		for _, one := range beings {
+			handle, err := w.remote(rel, one.Being, text)
+			if err != nil {
+				return nil, err
+			}
+			at = append(at, reached{being: one.Being, digest: c.Digest, handle: handle})
+		}
+	}
+	return at, nil
+}
+
+func handlesOf(at []reached) []Handle {
+	out := make([]Handle, 0, len(at))
+	for _, one := range at {
+		out = append(out, one.handle)
+	}
+	return out
+}
+
+// Knocking is what a knock needs besides the card: the being of this ground
+// that will hold the relation, and the private label to reach it by.
+type Knocking struct {
+	Holder [32]byte
+	Label  string
+}
+
+// Knock turns a card into a handle at the far door's public being, held as a
+// stranger. The voice is drawn here and nobody granted it, so it stands nowhere
+// at that door and every ask down it is judged as a stranger's — which is what
+// makes the estate it describes the one that door shows a stranger.
+//
+// The row keeps no heir: a stranger holds no standing, so there is nothing for
+// a rotation to take over. What the card gives it is the far door's own heir
+// commitment, which is how a stranger believes that house's succession.
+func (w *Warden) Knock(card wire.Card, k Knocking) (Handle, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if card.Warden == ([32]byte{}) {
+		return nil, errors.New("warden: a card naming no door")
+	}
+	secret := w.random()
+	rel := &outbound{
+		holder:      k.Holder,
+		warden:      card.Warden,
+		commitment:  card.Commitment,
+		padlock:     card.Padlock,
+		voice:       arithmetic.SigningKey(secret),
+		voiceSecret: secret,
+		hints:       slices.Clone(card.Hints),
+		spent:       map[int64]bool{},
+		beings:      map[[32]byte][32]byte{},
+		awaiting:    map[await]chan *heard{},
+	}
+	// The public being is of the one class nobody authors, so its text is
+	// already held and a knock asks the door nothing to reach it.
+	handle, err := w.remote(rel, card.Warden, Blueprint)
+	if err != nil {
+		return nil, err
+	}
+	w.record.out = append(w.record.out, rel)
+	if k.Label != "" {
+		w.labels[k.Label] = &label{row: rel, at: []reached{{being: card.Warden, digest: Digest, handle: handle}}}
+	}
+	w.persist()
+	return handle, nil
+}
+
+// atFar is one ask at the far door's own being: the four introspections a
+// handle offers, and the blueprint fetch an accept makes on its own account.
+// Nothing here is a second mechanism — it is the ordinary envelope, addressed
+// to the door rather than to a being.
+func (w *Warden) atFar(ctx context.Context, rel *outbound, field string, arg any, allowance envelope.Allowance) (any, bool) {
+	m := envelope.Method{Name: field, Args: []byte{}}
+	if arg != nil {
+		blob, err := wire.Encode(Own, ArgType(field), arg)
+		if err != nil {
+			return nil, false
+		}
+		m.Args = blob
+	}
+	answer := w.exchange(ctx, rel, Reach{Far: rel.warden, Method: &m, Allowance: allowance})
+	if answer == nil || answer.Data == nil {
+		return nil, false
+	}
+	t, ok := answerType(field)
+	if !ok {
+		return nil, false
+	}
+	v, err := wire.Decode(Own, t, answer.Data)
+	if err != nil {
+		return nil, false
+	}
+	// An optional answered absent is a value nobody can use, and the caller is
+	// told the same nothing a refusal tells it.
+	return v, v != nil
+}
+
+// introspect is atFar under the leash in scope, which is what a being's own
+// call is made under.
+func (w *Warden) introspect(ctx context.Context, rel *outbound, field string, arg any) (any, bool) {
+	w.mu.Lock()
+	allowance, err := w.allowanceIn(ctx)
+	w.mu.Unlock()
+	if err != nil {
+		return nil, false
+	}
+	return w.atFar(ctx, rel, field, arg, allowance)
+}
+
+// exchange is one composed message put on its road and the answer waited for.
+// The lock is not held across delivery, because a judgment on this ground may
+// itself be what answers.
+func (w *Warden) exchange(ctx context.Context, rel *outbound, r Reach) *envelope.Answer {
+	w.mu.Lock()
+	message, seq, padlock, err := w.compose(rel, r)
+	if err != nil {
+		w.mu.Unlock()
+		return nil
+	}
+	waiting := w.await(rel, seq, padlock)
+	view := Row{Padlock: rel.padlock, Hints: slices.Clone(rel.hints)}
+	delivery, deadline := w.delivery, r.Allowance.Time
+	w.mu.Unlock()
+
+	back, later := delivery.Send(view, message)
+	switch {
+	case back != nil:
+		w.Arrive(back, nil)
+	case !later:
+		w.forgoAt(rel, seq, padlock)
+	}
+	return waitFor(ctx, waiting, deadline)
+}
+
+// forgoAt is Forgo on a row the caller already holds.
+func (w *Warden) forgoAt(rel *outbound, seq int64, padlock [32]byte) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	pending := await{seq: seq, padlock: padlock}
+	waiting, ok := rel.awaiting[pending]
+	if !ok {
+		return false
+	}
+	delete(rel.awaiting, pending)
+	// The caller waiting on it is told nothing came, which is the same nothing
+	// a refused ask gets. The number stays spent.
+	waiting <- nil
+	return true
 }
 
 // Hear opens an answer a far door sent back, under the padlock secret the call
@@ -1254,25 +1771,57 @@ func (w *Warden) Accept(inv wire.Invitation, a Accepting) (Accepted, error) {
 // that warden must be a door this ground actually asked, and an ask must be
 // awaiting under that padlock, that warden and that seq. An answer nothing
 // awaits is the same silence as every other failure.
-func (w *Warden) Hear(padlockSecret [32]byte, message []byte) (envelope.Answer, error) {
-	a, err := envelope.OpenAnswer(padlockSecret, message)
-	if err != nil {
-		return envelope.Answer{}, err
-	}
-	padlock, err := arithmetic.SealingKey(padlockSecret)
-	if err != nil {
-		return envelope.Answer{}, err
-	}
-	rel, ok := w.record.out[a.Warden]
-	if !ok {
-		return envelope.Answer{}, errors.New("warden: an answer from a house this ground holds no relation with")
-	}
-	pending := await{seq: a.Seq, padlock: padlock}
-	if !rel.awaiting[pending] {
+// The padlock secret is the warden's own, because the warden is the only thing
+// that holds one: a road that opened a seal to sort a frame would have climbed
+// a layer it does not belong to.
+func (w *Warden) Hear(message []byte) (envelope.Answer, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.hear2(message)
+}
+
+func (w *Warden) hear2(message []byte) (envelope.Answer, error) {
+	var last error
+	for _, secret := range w.padlockSecrets {
+		a, err := envelope.OpenAnswer(secret, message)
+		if err != nil {
+			last = err
+			continue
+		}
+		padlock, err := arithmetic.SealingKey(secret)
+		if err != nil {
+			return envelope.Answer{}, err
+		}
+		// One far warden may be held by more than one row — the record says
+		// which of this ground's beings may spend which relation — so the
+		// awaiting entry is what picks the row, not the name alone.
+		pending := await{seq: a.Seq, padlock: padlock}
+		stood := false
+		for _, rel := range w.record.out {
+			if rel.warden != a.Warden {
+				continue
+			}
+			stood = true
+			waiting, ok := rel.awaiting[pending]
+			if !ok {
+				continue
+			}
+			delete(rel.awaiting, pending)
+			// Hearing one spends the record, so the same bytes never answer
+			// twice, and the caller waiting on this ask is settled with what
+			// arrived.
+			waiting <- &heard{answer: a}
+			return a, nil
+		}
+		if !stood {
+			return envelope.Answer{}, errors.New("warden: an answer from a house this ground holds no relation with")
+		}
 		return envelope.Answer{}, errors.New("warden: an answer nothing awaits")
 	}
-	delete(rel.awaiting, pending)
-	return a, nil
+	if last == nil {
+		last = errors.New("warden: no secret to open with")
+	}
+	return envelope.Answer{}, last
 }
 
 // Forgo drops an awaiting ask whose answer will never come — a road that
@@ -1280,34 +1829,88 @@ func (w *Warden) Hear(padlockSecret [32]byte, message []byte) (envelope.Answer, 
 // changes: the number stays spent, because a message the far door judged spent
 // it there whatever this end does with its own record.
 func (w *Warden) Forgo(far [32]byte, seq int64, padlock [32]byte) bool {
-	rel, ok := w.record.out[far]
-	if !ok {
-		return false
-	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	if padlock == ([32]byte{}) {
 		padlock = w.padlock
 	}
 	pending := await{seq: seq, padlock: padlock}
-	if !rel.awaiting[pending] {
-		return false
+	for _, rel := range w.record.out {
+		if rel.warden != far {
+			continue
+		}
+		waiting, ok := rel.awaiting[pending]
+		if !ok {
+			continue
+		}
+		delete(rel.awaiting, pending)
+		// The caller waiting on it is told nothing came, which is the same
+		// nothing a refused ask gets.
+		waiting <- nil
+		return true
 	}
-	delete(rel.awaiting, pending)
-	return true
+	return false
 }
 
-// Awaiting is how many asks this ground has out down one relation with no
-// answer heard yet.
-func (w *Warden) Awaiting(far [32]byte) int {
-	rel, ok := w.record.out[far]
-	if !ok {
-		return 0
+// Pending is one ask this ground has out with no answer heard yet. It is taken
+// before the bytes are put on a road, because the answer may be back before the
+// caller has stopped sending — a road that answers in its own response, or a
+// judgment on this same ground.
+type Pending struct{ waiting chan *heard }
+
+// Expect hands back the ask awaiting under that padlock, that warden and that
+// number, so a host that composed with Ask and carries the bytes itself settles
+// exactly as a handle does. A zero padlock is this warden's own, which is what
+// an ask that named none asked the far door to seal to.
+//
+// An ask nothing awaits answers a Pending that is never settled, which waits out
+// its deadline and reports nothing — the same nothing every other failure gets.
+func (w *Warden) Expect(far [32]byte, seq int64, padlock [32]byte) *Pending {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if padlock == ([32]byte{}) {
+		padlock = w.padlock
 	}
-	return len(rel.awaiting)
+	pending := await{seq: seq, padlock: padlock}
+	for _, rel := range w.record.out {
+		if rel.warden != far {
+			continue
+		}
+		if held, ok := rel.awaiting[pending]; ok {
+			return &Pending{waiting: held}
+		}
+	}
+	return &Pending{}
 }
 
-// PadlockSecret is the secret behind this warden's current padlock, which is
-// what a caller using the default return padlock opens an answer with.
-func (w *Warden) PadlockSecret() [32]byte { return w.padlockSecrets[0] }
+// Wait blocks until the answer arrives through the warden's one entry point, the
+// ask is forgone, or the deadline passes. The deadline is in the milliseconds an
+// allowance is counted in.
+func (p *Pending) Wait(ctx context.Context, deadline int64) (envelope.Answer, bool) {
+	answer := waitFor(ctx, p.waiting, deadline)
+	if answer == nil {
+		return envelope.Answer{}, false
+	}
+	return *answer, true
+}
+
+// Lock takes a second return lock into this warden's keeping and hands back
+// its public key, so a caller may name it as the padlock an answer is sealed
+// to. Which lock a peer seals to is the caller's own choice and the whole of
+// what a caller can do about being linked across doors; the secret stays here,
+// because a road that held one would be a road holding a secret.
+func (w *Warden) Lock(secret [32]byte) ([32]byte, error) {
+	padlock, err := arithmetic.SealingKey(secret)
+	if err != nil {
+		return [32]byte{}, err
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !slices.Contains(w.padlockSecrets, secret) {
+		w.padlockSecrets = append(w.padlockSecrets, secret)
+	}
+	return padlock, nil
+}
 
 // kind is what a message turns out to be, read off the voice and never
 // declared. A caller cannot claim to be rotating.
@@ -1320,11 +1923,64 @@ const (
 	kindStranger
 )
 
-// Judge runs the eight steps over what arrived and hands back what to send.
+// Arrive is the one entry point for arriving bytes, whatever road carried
+// them. It unseals once; the record byte inside the seal says which of the two
+// records arrived, and only the warden reads it. An answer settles the ask
+// awaiting it and the road gets nothing back; a say is judged and the road gets
+// bytes or silence. A road never opens a seal to route.
 //
-// A nil answer is silence, and silence is the whole of every refusal. The
-// error beside it is for the host: it names the step, and it never travels.
-func (w *Warden) Judge(draws Draws, message []byte) (answer []byte, err error) {
+// via is the road the bytes arrived on, opaque to the warden and handed back to
+// delivery beside the caller's padlock once the way back is refreshed — so a
+// peer that publishes nothing can be reached down the line it holds, and the
+// road never had to open a seal to be remembered.
+func (w *Warden) Arrive(message []byte, via any) []byte {
+	w.mu.Lock()
+	inside, err := w.unseal(message)
+	if err != nil {
+		w.mu.Unlock()
+		w.hush(nil, err)
+		return nil
+	}
+	if len(inside) > 0 && inside[0] == envelope.AnswerTag {
+		_, err := w.hear2(message)
+		w.mu.Unlock()
+		if err != nil {
+			w.hush(nil, err)
+		}
+		return nil
+	}
+	// The judgment runs with the lock held and drops it around the being, which
+	// may reach back in — a call made while answering a call is the ordinary
+	// middle of a chain.
+	answer, err := w.judgeLocked(message, via)
+	w.mu.Unlock()
+	return answer
+}
+
+// unseal opens the envelope far enough to read the record byte and no further.
+// It is the one place a seal is opened for sorting, and it is inside the
+// warden, which is the layer that holds the secret.
+func (w *Warden) unseal(message []byte) ([]byte, error) {
+	var last error
+	for _, secret := range w.padlockSecrets {
+		plain, err := envelope.Unseal(secret, message)
+		if err != nil {
+			last = err
+			continue
+		}
+		return plain, nil
+	}
+	if last == nil {
+		last = errors.New("warden: no secret to open with")
+	}
+	return nil, last
+}
+
+// judgeLocked runs the eight steps over what arrived and hands back what to
+// send. A nil answer is silence, and silence is the whole of every refusal.
+// The error beside it never travels: it is the reason the door reports inward,
+// through hush.
+func (w *Warden) judgeLocked(message []byte, via any) (answer []byte, err error) {
 	// Every silence leaves through here and nowhere else, so the inward fault
 	// and the outward silence cannot drift apart. A being that panics is the
 	// same silence as every other refusal: the door is the global recover, and
@@ -1339,14 +1995,14 @@ func (w *Warden) Judge(draws Draws, message []byte) (answer []byte, err error) {
 			w.hush(say, err)
 		}
 	}()
-	answer, err = w.judge(draws, message, &say)
+	answer, err = w.judge(message, via, &say)
 	return answer, err
 }
 
 // judge is the eight steps themselves. It hands the payload back through `at`
 // the moment it has one, so a fault beneath the door is still observed with
 // the address the message carried.
-func (w *Warden) judge(draws Draws, message []byte, at **envelope.Say) ([]byte, error) {
+func (w *Warden) judge(message []byte, via any, at **envelope.Say) ([]byte, error) {
 	// The first of the two readings the dwell is the difference of. It is taken
 	// before anything else, because what it marks is when the message arrived
 	// and not when the door got round to it.
@@ -1366,6 +2022,13 @@ func (w *Warden) judge(draws Draws, message []byte, at **envelope.Say) ([]byte, 
 		return nil, err
 	}
 	*at = &say
+
+	// The key this door's answer is sealed under, drawn once the message has
+	// opened and before anything else this judgment may draw. Every draw is
+	// taken from the randomness the host handed in at open, and the order they
+	// are taken in is fixed so a host that hands a pinned sequence gets the
+	// same bytes twice.
+	ephemeral := w.random()
 
 	// Step three: the name or padlock the payload carries must be this door's.
 	// Here and not later, because a payload addressed elsewhere must never
@@ -1402,6 +2065,15 @@ func (w *Warden) judge(draws Draws, message []byte, at **envelope.Say) ([]byte, 
 			row.hints = slices.Clone(say.Hints)
 		}
 	}
+	// The number is spent and the way back refreshed: what a restart must not
+	// lose has just changed.
+	w.persist()
+	// Delivery learns the road this padlock's asks arrive on, as an address
+	// beside an opaque token it never read. That is the warden's one call
+	// downward, and anything more handed that way is the leak.
+	if via != nil && w.delivery != nil {
+		w.delivery.Arrived(say.Padlock, via)
+	}
 
 	// Step six: the leash, judged on what arrived. A hop count of zero is a
 	// legal leash for a call that goes no further — what it forbids is onward —
@@ -1425,12 +2097,12 @@ func (w *Warden) judge(draws Draws, message []byte, at **envelope.Say) ([]byte, 
 		w.offer(say.Voice, k)
 	}
 
-	data, err := w.route(draws, leash, k, say, row, rel)
+	data, err := w.route(leash, k, say, row, rel)
 	if err != nil {
 		return nil, err
 	}
 
-	return envelope.SealAnswer(draws.Ephemeral, say.Padlock, w.nameSecret, envelope.Answer{
+	return envelope.SealAnswer(ephemeral, say.Padlock, w.nameSecret, envelope.Answer{
 		Warden: w.name,
 		Seq:    say.Seq,
 		Data:   data,
@@ -1465,7 +2137,11 @@ func (w *Warden) place(say envelope.Say) (kind, *inbound, *outbound, error) {
 		return kindAsk, row, nil, nil
 	}
 
-	if row := w.record.heir(say.Voice); row != nil {
+	row, ambiguous := w.record.heir(say.Voice)
+	if ambiguous {
+		return 0, nil, nil, errors.New("warden: a hash matching more than one standing")
+	}
+	if row != nil {
 		if say.Commitment == nil {
 			return 0, nil, nil, errors.New("warden: a rotation carrying no fresh commitment")
 		}
@@ -1570,7 +2246,7 @@ func (w *Warden) count(k kind, say envelope.Say, row *inbound, rel *outbound) er
 
 // route is step seven. What comes back is the answer's data, or nil when the
 // field answers nothing.
-func (w *Warden) route(draws Draws, leash Leash, k kind, say envelope.Say, row *inbound, rel *outbound) ([]byte, error) {
+func (w *Warden) route(leash Leash, k kind, say envelope.Say, row *inbound, rel *outbound) ([]byte, error) {
 	if k == kindNews {
 		// News reaches the warden's own being, named or not. A granting warden
 		// sending news has never had a describe from its peer, so naming the
@@ -1609,7 +2285,7 @@ func (w *Warden) route(draws Draws, leash Leash, k kind, say envelope.Say, row *
 	}
 
 	if target == w.self() {
-		return w.own(draws, k, row, *say.Method)
+		return w.own(k, row, *say.Method)
 	}
 	if _, gone := w.moved[target]; gone {
 		// The old door only points: it answers `moved` with the succession and
@@ -1620,7 +2296,7 @@ func (w *Warden) route(draws Draws, leash Leash, k kind, say envelope.Say, row *
 		// never forwards and never acts on the being's behalf again.
 		return nil, errors.New("warden: that being has moved")
 	}
-	if h.object == nil {
+	if h.object == nil || h.bound == nil {
 		return nil, errors.New("warden: nothing answers for that being")
 	}
 	// The blueprint is the scope: a name it never declared is not reached for
@@ -1628,12 +2304,50 @@ func (w *Warden) route(draws Draws, leash Leash, k kind, say envelope.Say, row *
 	if !h.declares[say.Method.Name] {
 		return nil, fmt.Errorf("warden: that being's blueprint declares no field %q", say.Method.Name)
 	}
-	return h.object.Invoke(Call{Method: say.Method.Name, Args: say.Method.Args, Leash: leash})
+	// The being is reached with the caller and the leash in scope, arguments
+	// decoded and the answer encoded. What must be bytes or nothing at the wire
+	// is made so here, never by the being.
+	//
+	// The lock is dropped around it: a being in the middle of a chain does its
+	// own work before it answers, and reaching another house means reaching
+	// back into this warden.
+	ctx := within(context.Background(), InScope{
+		Caller: Caller{Voice: say.Voice, Kind: k.caller()},
+		Leash:  leash,
+	})
+	bound, name, args := h.bound, say.Method.Name, say.Method.Args
+	return w.outside(func() ([]byte, error) { return bound.invoke(ctx, name, args) })
+}
+
+// outside runs work with the lock let go and takes it back however the work
+// ends. A being that panics is the same silence as every other refusal, and a
+// door that came back from one without its own lock would be a door that
+// panics at its host next.
+func (w *Warden) outside(work func() ([]byte, error)) (data []byte, err error) {
+	w.mu.Unlock()
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("warden: something beneath the door panicked: %v", r)
+		}
+		w.mu.Lock()
+	}()
+	return work()
+}
+
+// caller is which kind of caller a placement found, as the house is told it.
+func (k kind) caller() CallerKind {
+	switch k {
+	case kindAsk:
+		return CallerHolder
+	case kindRotation:
+		return CallerRotation
+	}
+	return CallerStranger
 }
 
 // own answers the warden's own being. Every one of these fields is a field on
 // the blueprint Quo writes, spent by an ordinary standing.
-func (w *Warden) own(draws Draws, k kind, row *inbound, m envelope.Method) ([]byte, error) {
+func (w *Warden) own(k kind, row *inbound, m envelope.Method) ([]byte, error) {
 	switch m.Name {
 	case FieldDescribe:
 		if err := noArgs(m); err != nil {
@@ -1674,10 +2388,15 @@ func (w *Warden) own(draws Draws, k kind, row *inbound, m envelope.Method) ([]by
 		// were not reach enough, the old door could not point about the one
 		// being Article XIII sends every peer behind the news to ask it about.
 		word, published := w.moved[being]
-		// To a holder who reached it before, never to a stranger. A stranger
-		// has no row, and a door that pointed for anyone who asked would hand
-		// a succession to whoever guessed a name.
-		pointing := published && row != nil
+		// To a holder who reached it before, never to a stranger — and holding
+		// a standing at some other being here is not having reached this one.
+		// At the old door the standings still name the being that left, which
+		// the reach test below catches; at a destination they name it by the
+		// key this house minted, so reaching the successor the published word
+		// names is what reached-it-before means there. A door that pointed for
+		// anyone with a row would tell whoever holds anything here that this
+		// being exists and where it went.
+		pointing := published && word.Successor != nil && w.reaches(row, *word.Successor)
 		if !w.reaches(row, being) && !pointing {
 			return nil, errors.New("warden: that voice does not reach that being")
 		}
@@ -1706,7 +2425,7 @@ func (w *Warden) own(draws Draws, k kind, row *inbound, m envelope.Method) ([]by
 			// gate. The ordinary one serves.
 			return nil, errors.New("warden: a stranger cannot push a being in")
 		}
-		return w.receive(draws, row, m)
+		return w.receive(row, m)
 	}
 	return nil, fmt.Errorf("warden: the warden declares no field %q", m.Name)
 }
@@ -1802,12 +2521,8 @@ func (w *Warden) tell(rel *outbound, voice [32]byte, args []byte) ([]byte, error
 		// An empty hints list means the road did not change, never an erasure.
 		rel.hints = slices.Clone(word.Hints)
 	}
-	for far, r := range w.record.out {
-		if r == rel && far != rel.warden {
-			delete(w.record.out, far)
-			w.record.out[rel.warden] = rel
-		}
-	}
+	// The row is a pointer in a list, so a house that succeeded its name is
+	// found by the name it now wears with nothing to re-key.
 	// tell answers nothing, and a field that answers nothing answers zero bytes.
 	return nil, nil
 }
@@ -1823,7 +2538,10 @@ func (w *Warden) tell(rel *outbound, voice [32]byte, args []byte) ([]byte, error
 // instead names a key that will not sign anything until the succession after
 // this one, so the peer disbelieves the news and is left standing at a house
 // that has stopped answering.
-func (w *Warden) receive(draws Draws, row *inbound, m envelope.Method) ([]byte, error) {
+func (w *Warden) receive(row *inbound, m envelope.Method) ([]byte, error) {
+	// The two keys the destination mints and the origin never saw, drawn from
+	// the randomness the host handed in at open.
+	draws := struct{ Being, Heir [32]byte }{Being: w.random(), Heir: w.random()}
 	v, err := wire.Decode(Own, argType(FieldReceive), m.Args)
 	if err != nil {
 		return nil, err
@@ -1856,7 +2574,11 @@ func (w *Warden) receive(draws Draws, row *inbound, m envelope.Method) ([]byte, 
 	if err != nil {
 		return nil, err
 	}
-	w.beings[pk] = &held{
+	b, err := bind(c.bp, object)
+	if err != nil {
+		return nil, err
+	}
+	one := &held{
 		pk:         pk,
 		secret:     draws.Being,
 		digest:     cargo.Digest,
@@ -1866,7 +2588,13 @@ func (w *Warden) receive(draws Draws, row *inbound, m envelope.Method) ([]byte, 
 		// migration's two rotations, and a being with no heir has none.
 		heir:     heir,
 		object:   object,
+		bound:    b,
 		declares: c.declares,
+	}
+	one.quo = &Quo{w: w, being: pk}
+	w.beings[pk] = one
+	if a, ok := object.(attaching); ok {
+		a.attach(one.quo)
 	}
 	// The inbound record and the replay window travel with the being, or every
 	// peer's standing would have to be regranted and every spent number would
@@ -1901,7 +2629,7 @@ func (w *Warden) receive(draws Draws, row *inbound, m envelope.Method) ([]byte, 
 	// never heard of the being at all — but a being that cannot reach them has
 	// still lost everything it could do.
 	for _, r := range cargo.Relations {
-		w.record.out[r.Warden] = &outbound{
+		w.record.out = append(w.record.out, &outbound{
 			// Held by the name the being wears here, so it travels again when
 			// the being does.
 			holder:      pk,
@@ -1918,8 +2646,8 @@ func (w *Warden) receive(draws Draws, row *inbound, m envelope.Method) ([]byte, 
 			mark:     r.News,
 			spent:    map[int64]bool{},
 			beings:   map[[32]byte][32]byte{},
-			awaiting: map[await]bool{},
-		}
+			awaiting: map[await]chan *heard{},
+		})
 	}
 	_ = row
 
@@ -1942,7 +2670,7 @@ func (w *Warden) receive(draws Draws, row *inbound, m envelope.Method) ([]byte, 
 		// composes — a card, a grant, an ask, a piece of news. Landed is where
 		// they are named, and it names them into this same word.
 	}
-	w.Publish(cargo.Being, word)
+	w.Point(cargo.Being, word)
 	voices := make([][32]byte, 0, len(cargo.Standings))
 	for _, s := range cargo.Standings {
 		voices = append(voices, s.Voice)

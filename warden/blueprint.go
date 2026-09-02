@@ -1,7 +1,7 @@
 // Package warden holds the door's judgment: the two records a warden keeps,
 // the heir chain, the three describes, and the blueprint every warden holds.
 //
-// Nothing here touches a carriage. Judge takes the bytes that arrived and
+// Nothing here touches a carriage. Arrive takes the bytes that arrived and
 // hands back the bytes to send, or silence. Every failure is the same failure:
 // the door answers with silence and never says which step it was, so the
 // reasons in this package are for the host and never travel.
@@ -244,11 +244,16 @@ func DecodeSketch(b []byte) (Sketch, error) {
 	if err != nil {
 		return Sketch{}, err
 	}
+	return readSketch(v)
+}
+
+func readSketch(v any) (Sketch, error) {
 	f, ok := v.(map[string]any)
 	if !ok {
 		return Sketch{}, errors.New("warden: that is not a sketch")
 	}
 	var s Sketch
+	var err error
 	if s.Being, err = key(f, "being"); err != nil {
 		return Sketch{}, err
 	}

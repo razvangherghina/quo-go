@@ -1,7 +1,7 @@
 package warden_test
 
 import (
-	"bytes"
+	"fmt"
 	"reflect"
 	"testing"
 
@@ -16,6 +16,12 @@ import (
 // Every case is asserted from the law's own words; none of it produces bytes
 // the corpus could measure.
 
+// other is a being of a second class, for the cases about what a standing
+// reaches rather than about what a being answers.
+type other struct{ warden.Attach }
+
+func (other) F() bool { return true }
+
 // estate describes at that number and hands back the classes the holder sees.
 func (g *ground) estate(seq int64) []warden.Class {
 	g.t.Helper()
@@ -25,13 +31,29 @@ func (g *ground) estate(seq int64) []warden.Class {
 // house stands a second ground up, so a call has somewhere to come from.
 func house(t *testing.T, label string) *warden.Warden {
 	t.Helper()
+	return housed(t, label, nil)
+}
+
+// housed is house with delivery handed in, for the cases that need this ground
+// to be able to speak first.
+func housed(t *testing.T, label string, delivery warden.Delivery) *warden.Warden {
+	t.Helper()
 	name := secret(label + "/name")
+	at := 0
 	w, err := warden.New(warden.Founding{
 		NameSecret:     name,
 		HeirCommitment: arithmetic.Commit(arithmetic.SigningKey(name), arithmetic.SigningKey(secret(label+"/wardenHeir"))),
 		PadlockSecret:  secret(label + "/padlock"),
 		Limit:          1 << 20,
 		Clock:          (&tick{}).read,
+		// A fixed sequence, so nothing here is random: what a case asserts is
+		// never the key itself, only that one was drawn where the law says one
+		// is drawn.
+		Random: func() [32]byte {
+			at++
+			return secret(fmt.Sprintf("%s/draw/%d", label, at))
+		},
+		Delivery: delivery,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -44,7 +66,10 @@ func house(t *testing.T, label string) *warden.Warden {
 // holder simply finds more or less the next time it describes.
 func TestAStandingIsAmendedNotReplaced(t *testing.T) {
 	g := stand(t)
-	second, err := g.w.Hold("Other\n  f() bool\n", &todo{}, warden.Keys{Secret: secret("second"), HeirSecret: secret("secondHeir")})
+	second, _, err := g.w.Hold(&other{}, warden.Holding{
+		Blueprint: "Other\n  f() bool\n",
+		Keys:      warden.Keys{Secret: secret("second"), HeirSecret: secret("secondHeir")},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +132,7 @@ func TestReleasingABeingTakesItsStandingsWithIt(t *testing.T) {
 // but never copied: there is one holder, always.
 func TestGrantRefusesAVoiceThatAlreadyStands(t *testing.T) {
 	g := stand(t)
-	if _, err := g.w.Grant(g.being, warden.Keys{Secret: secret("voice"), HeirSecret: secret("voiceHeir")}, g.w.Padlock(), nil); err == nil {
+	if _, err := g.w.GrantAs(g.being, warden.Keys{Secret: secret("voice"), HeirSecret: secret("voiceHeir")}, g.w.Padlock(), nil); err == nil {
 		t.Fatal("one voice was granted twice")
 	}
 }
@@ -116,7 +141,7 @@ func TestGrantRefusesAVoiceThatAlreadyStands(t *testing.T) {
 // at what it keeps.
 func TestGrantRefusesABeingTheWardenDoesNotHold(t *testing.T) {
 	g := stand(t)
-	if _, err := g.w.Grant([32]byte{9}, warden.Keys{Secret: secret("v2"), HeirSecret: secret("v2h")}, g.w.Padlock(), nil); err == nil {
+	if _, err := g.w.GrantAs([32]byte{9}, warden.Keys{Secret: secret("v2"), HeirSecret: secret("v2h")}, g.w.Padlock(), nil); err == nil {
 		t.Fatal("a warden granted at a being it does not hold")
 	}
 }
@@ -131,11 +156,11 @@ func TestACallCarriesItsOwnLeashAndTheDoorSpendsIt(t *testing.T) {
 	caller.Stand(caller.Self(), g.inv, g.inv.HeirSecret)
 
 	for _, leash := range []envelope.Allowance{{Time: 0, Hops: 8}, {Time: 5000, Hops: -1}, {Time: -1, Hops: -1}} {
-		if _, _, err := caller.Ask(secret("askEphemeral"), warden.Reach{Far: g.inv.Warden, Allowance: leash}); err == nil {
+		if _, _, err := caller.Ask(warden.Reach{Far: g.inv.Warden, Allowance: leash}); err == nil {
 			t.Fatalf("a call with %#v left this ground", leash)
 		}
 	}
-	if _, _, err := caller.Ask(secret("askEphemeral"), warden.Reach{
+	if _, _, err := caller.Ask(warden.Reach{
 		Far:       g.inv.Warden,
 		Allowance: envelope.Allowance{Time: 5000, Hops: 0},
 	}); err != nil {
@@ -147,7 +172,7 @@ func TestACallCarriesItsOwnLeashAndTheDoorSpendsIt(t *testing.T) {
 // never the relation's key: with no row there is nothing to sign with.
 func TestACallNeedsARelation(t *testing.T) {
 	caller := house(t, "caller")
-	if _, _, err := caller.Ask(secret("askEphemeral"), warden.Reach{
+	if _, _, err := caller.Ask(warden.Reach{
 		Far:       [32]byte{9},
 		Allowance: envelope.Allowance{Time: 1, Hops: 1},
 	}); err == nil {
@@ -167,11 +192,11 @@ func TestTheCountOnlyRisesForOneVoice(t *testing.T) {
 
 	rotate := reach
 	rotate.NextHeir = &mine
-	if _, seq, err := caller.Ask(secret("e1"), rotate); err != nil || seq != 1 {
+	if _, seq, err := caller.Ask(rotate); err != nil || seq != 1 {
 		t.Fatalf("the rotate-and-ask spent %d (%v), want 1", seq, err)
 	}
 	for want := int64(2); want <= 4; want++ {
-		_, seq, err := caller.Ask(secret("e1"), reach)
+		_, seq, err := caller.Ask(reach)
 		if err != nil || seq != want {
 			t.Fatalf("spent %d (%v), want %d", seq, err, want)
 		}
@@ -182,7 +207,7 @@ func TestTheCountOnlyRisesForOneVoice(t *testing.T) {
 	caller.Forgo(g.inv.Warden, 1, [32]byte{})
 	next := secret("callerHeir2")
 	rotate.NextHeir = &next
-	if _, seq, err := caller.Ask(secret("e1"), rotate); err != nil || seq != 1 {
+	if _, seq, err := caller.Ask(rotate); err != nil || seq != 1 {
 		t.Fatalf("the second rotation spent %d (%v), want 1", seq, err)
 	}
 }
@@ -197,7 +222,7 @@ func TestARotationCarriesAFreshCommitmentUnderTheFarDoor(t *testing.T) {
 	caller.Stand(caller.Self(), g.inv, g.inv.HeirSecret)
 
 	mine := secret("callerHeir")
-	message, _, err := caller.Ask(secret("askEphemeral"), warden.Reach{
+	message, _, err := caller.Ask(warden.Reach{
 		Far:       g.inv.Warden,
 		Allowance: envelope.Allowance{Time: 5000, Hops: 8},
 		NextHeir:  &mine,
@@ -205,7 +230,7 @@ func TestARotationCarriesAFreshCommitmentUnderTheFarDoor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	say, err := envelope.OpenSay(g.w.PadlockSecret(), message)
+	say, err := envelope.OpenSay(secret("padlock"), message)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,14 +243,14 @@ func TestARotationCarriesAFreshCommitmentUnderTheFarDoor(t *testing.T) {
 	}
 	// A plain ask carries none: the commitment rides only when the message
 	// spends an heir.
-	message, _, err = caller.Ask(secret("askEphemeral"), warden.Reach{
+	message, _, err = caller.Ask(warden.Reach{
 		Far:       g.inv.Warden,
 		Allowance: envelope.Allowance{Time: 5000, Hops: 8},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	say, err = envelope.OpenSay(g.w.PadlockSecret(), message)
+	say, err = envelope.OpenSay(secret("padlock"), message)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -243,14 +268,14 @@ func TestTheCallerNamesTheDoorAndItsOwnReturnPadlock(t *testing.T) {
 	caller := house(t, "caller")
 	caller.Stand(caller.Self(), g.inv, g.inv.HeirSecret)
 
-	message, _, err := caller.Ask(secret("askEphemeral"), warden.Reach{
+	message, _, err := caller.Ask(warden.Reach{
 		Far:       g.inv.Warden,
 		Allowance: envelope.Allowance{Time: 5000, Hops: 8},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	say, err := envelope.OpenSay(g.w.PadlockSecret(), message)
+	say, err := envelope.OpenSay(secret("padlock"), message)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -263,11 +288,13 @@ func TestTheCallerNamesTheDoorAndItsOwnReturnPadlock(t *testing.T) {
 
 	// A padlock kept for this relation alone is the whole of what a caller can
 	// do about being linked across doors, so it must be the caller's to set.
-	alone, err := arithmetic.SealingKey(secret("perRelation"))
+	// The secret stays in the warden, because a caller that held one outside
+	// would be holding the one thing this picture says only a warden holds.
+	alone, err := caller.Lock(secret("perRelation"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	message, _, err = caller.Ask(secret("askEphemeral"), warden.Reach{
+	message, _, err = caller.Ask(warden.Reach{
 		Far:       g.inv.Warden,
 		Allowance: envelope.Allowance{Time: 5000, Hops: 8},
 		Padlock:   alone,
@@ -275,7 +302,7 @@ func TestTheCallerNamesTheDoorAndItsOwnReturnPadlock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	say, err = envelope.OpenSay(g.w.PadlockSecret(), message)
+	say, err = envelope.OpenSay(secret("padlock"), message)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -297,12 +324,15 @@ func TestTheAnswerIsSealedToTheReturnPadlock(t *testing.T) {
 	caller := house(t, "caller")
 	caller.Stand(caller.Self(), g.inv, g.inv.HeirSecret)
 
-	alone, err := arithmetic.SealingKey(secret("perRelation"))
+	// A lock this caller keeps for one relation alone. The secret stays in the
+	// warden, because a caller that held one outside would be holding the one
+	// thing this picture says only a warden holds.
+	alone, err := caller.Lock(secret("perRelation"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	mine := secret("callerHeir")
-	message, seq, err := caller.Ask(secret("askEphemeral"), warden.Reach{
+	message, seq, err := caller.Ask(warden.Reach{
 		Far:       g.inv.Warden,
 		Allowance: envelope.Allowance{Time: 5000, Hops: 8},
 		Padlock:   alone,
@@ -311,18 +341,20 @@ func TestTheAnswerIsSealedToTheReturnPadlock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reply, err := g.w.Judge(warden.Draws{Ephemeral: secret("answerEphemeral"), Being: secret("receiveBeing"), Heir: secret("receiveHeir")}, message)
-	if err != nil {
-		t.Fatal(err)
+	reply := g.w.Arrive(message, nil)
+	if reply == nil {
+		t.Fatal("the door said nothing to an ask it should have answered")
 	}
-	answer, err := caller.Hear(secret("perRelation"), reply)
+	answer, err := caller.Hear(reply)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if answer.Warden != g.w.Name() || answer.Seq != seq {
 		t.Fatalf("the answer is %#v", answer)
 	}
-	if _, err := caller.Hear(caller.PadlockSecret(), reply); err == nil {
+	// And under nothing else: the warden's own lock, which the payload never
+	// named, does not open it.
+	if _, err := envelope.OpenAnswer(secret("caller/padlock"), reply); err == nil {
 		t.Fatal("the answer opened under a padlock the payload never named")
 	}
 }
@@ -419,11 +451,14 @@ func TestACargoOfAClassThisHouseCannotMakeIsRefused(t *testing.T) {
 func TestABeingArrivesAbleToActAgain(t *testing.T) {
 	g := stand(t) // the destination, and the ordinary gate a receive spends
 	third := house(t, "third")
-	room, err := third.Hold(todoText, &todo{}, warden.Keys{Secret: secret("third/room"), HeirSecret: secret("third/roomHeir")})
+	room, _, err := third.Hold(&todo{}, warden.Holding{
+		Blueprint: todoText,
+		Keys:      warden.Keys{Secret: secret("third/room"), HeirSecret: secret("third/roomHeir")},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	inv, err := third.Grant(room,
+	inv, err := third.GrantAs(room,
 		warden.Keys{Secret: secret("third/voice"), HeirSecret: secret("third/voiceHeir")},
 		third.Padlock(), []string{"https://third.example"})
 	if err != nil {
@@ -464,7 +499,7 @@ func TestABeingArrivesAbleToActAgain(t *testing.T) {
 	}
 
 	// Before the cargo lands, this ground stands nowhere at that house.
-	if _, _, err := g.w.Ask(secret("askEphemeral"), warden.Reach{
+	if _, _, err := g.w.Ask(warden.Reach{
 		Far: inv.Warden, Allowance: envelope.Allowance{Time: 5000, Hops: 8},
 	}); err == nil {
 		t.Fatal("a call left for a house this ground holds no relation with")
@@ -481,7 +516,7 @@ func TestABeingArrivesAbleToActAgain(t *testing.T) {
 	// house committed, so the first act is a rotate-and-ask, exactly as any
 	// holder's is.
 	mine := secret("arrivingNextHeir")
-	message, seq, err := g.w.Ask(secret("askEphemeral2"), warden.Reach{
+	message, seq, err := g.w.Ask(warden.Reach{
 		Far:       inv.Warden,
 		Allowance: envelope.Allowance{Time: 5000, Hops: 8},
 		NextHeir:  &mine,
@@ -492,11 +527,11 @@ func TestABeingArrivesAbleToActAgain(t *testing.T) {
 	if seq != 1 {
 		t.Fatalf("the rotate-and-ask spent %d, want 1", seq)
 	}
-	reply, err := third.Judge(warden.Draws{Ephemeral: secret("third/answerEphemeral")}, message)
-	if err != nil {
-		t.Fatalf("the third door refused the arrived being: %v", err)
+	reply := third.Arrive(message, nil)
+	if reply == nil {
+		t.Fatal("the third door refused the arrived being")
 	}
-	answer, err := g.w.Hear(g.w.PadlockSecret(), reply)
+	answer, err := g.w.Hear(reply)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -533,12 +568,14 @@ func TestABeingArrivesAbleToActAgain(t *testing.T) {
 func TestTheOriginComposesTheNewsItsPeersAreOwed(t *testing.T) {
 	origin := house(t, "departing")
 	peer := house(t, "hearing")
-	being, err := origin.Hold(todoText, &todo{},
-		warden.Keys{Secret: secret("departing/being"), HeirSecret: secret("departing/beingHeir")})
+	being, _, err := origin.Hold(&todo{}, warden.Holding{
+		Blueprint: todoText,
+		Keys:      warden.Keys{Secret: secret("departing/being"), HeirSecret: secret("departing/beingHeir")},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	inv, err := origin.Grant(being,
+	inv, err := origin.GrantAs(being,
 		warden.Keys{Secret: secret("departing/voice"), HeirSecret: secret("departing/voiceHeir")},
 		origin.Padlock(), []string{"https://departing.example"})
 	if err != nil {
@@ -553,7 +590,7 @@ func TestTheOriginComposesTheNewsItsPeersAreOwed(t *testing.T) {
 		t.Fatalf("a peer that has never spoken left a way back: %#v", told)
 	}
 	mine := secret("departing/peerNextHeir")
-	message, _, err := peer.Ask(secret("departing/askEphemeral"), warden.Reach{
+	message, _, err := peer.Ask(warden.Reach{
 		Far:       origin.Name(),
 		Being:     &being,
 		Allowance: envelope.Allowance{Time: 5000, Hops: 8},
@@ -563,8 +600,8 @@ func TestTheOriginComposesTheNewsItsPeersAreOwed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := origin.Judge(warden.Draws{Ephemeral: secret("departing/answerEphemeral")}, message); err != nil {
-		t.Fatal(err)
+	if origin.Arrive(message, nil) == nil {
+		t.Fatal("the origin said nothing to the peer's ask")
 	}
 	told := origin.Peers(being)
 	if len(told) != 1 || told[0].Padlock == nil || *told[0].Padlock != peer.Padlock() {
@@ -607,13 +644,13 @@ func TestTheOriginComposesTheNewsItsPeersAreOwed(t *testing.T) {
 	}
 	// The relations went with the cargo, so the old door can spend nothing on
 	// the being's behalf.
-	if _, _, err := origin.Ask(secret("departing/askEphemeral2"), warden.Reach{
+	if _, _, err := origin.Ask(warden.Reach{
 		Far: peer.Name(), Allowance: envelope.Allowance{Time: 5000, Hops: 8},
 	}); err == nil {
 		t.Fatal("the old door still holds a voice of the being's")
 	}
 
-	word, err := origin.News(secret("departing/newsEphemeral"), warden.Tell{
+	word, err := origin.News(warden.Tell{
 		Peer:        departed.Peers[0],
 		Voice:       departed.Voice,
 		VoiceSecret: departed.VoiceSecret,
@@ -625,9 +662,9 @@ func TestTheOriginComposesTheNewsItsPeersAreOwed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	data, err := peer.Judge(warden.Draws{Ephemeral: secret("hearing/answerEphemeral")}, word)
-	if err != nil {
-		t.Fatalf("the peer met the news it is owed with silence: %v", err)
+	data := peer.Arrive(word, nil)
+	if data == nil {
+		t.Fatal("the peer met the news it is owed with silence")
 	}
 	if data == nil {
 		t.Fatal("the news was not answered at all")
@@ -635,7 +672,7 @@ func TestTheOriginComposesTheNewsItsPeersAreOwed(t *testing.T) {
 
 	// Believed news rewrites the row entire, so the peer now stands at the
 	// house the being moved to and reaches it by the successor's name.
-	name, held, padlock, hints, ok := peer.Relation(landed.Name())
+	name, held, padlock, hints, ok := peer.RelationAt(landed.Name())
 	if !ok || name != landed.Name() || padlock != landed.Padlock() {
 		t.Fatalf("the relation did not follow the being: %x %v", name, ok)
 	}
@@ -645,13 +682,13 @@ func TestTheOriginComposesTheNewsItsPeersAreOwed(t *testing.T) {
 	if len(hints) != 1 || hints[0] != "https://landing.example" {
 		t.Fatalf("the roads did not travel: %v", hints)
 	}
-	if _, _, _, _, ok := peer.Relation(origin.Name()); ok {
+	if _, _, _, _, ok := peer.RelationAt(origin.Name()); ok {
 		t.Fatal("the peer still stands at the door the being left")
 	}
 
 	// A peer that never spoke is reached by the only means left: it asks, and
 	// the old door tells it the being has moved.
-	if _, err := origin.News(secret("departing/newsEphemeral2"), warden.Tell{
+	if _, err := origin.News(warden.Tell{
 		Peer:      warden.Peer{Voice: departed.Peers[0].Voice},
 		Voice:     departed.Voice,
 		Word:      departed.Word,
@@ -668,7 +705,10 @@ func TestTheOriginComposesTheNewsItsPeersAreOwed(t *testing.T) {
 // is this door's affair.
 func TestPackCarriesTheStandingsAtTheBeingThatMoves(t *testing.T) {
 	g := stand(t)
-	second, err := g.w.Hold("Other\n  f() bool\n", &todo{}, warden.Keys{Secret: secret("second"), HeirSecret: secret("secondHeir")})
+	second, _, err := g.w.Hold(&other{}, warden.Holding{
+		Blueprint: "Other\n  f() bool\n",
+		Keys:      warden.Keys{Secret: secret("second"), HeirSecret: secret("secondHeir")},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -734,18 +774,24 @@ func TestAMigratedRelationCanStillRotate(t *testing.T) {
 	third := house(t, "far")
 	origin := house(t, "origin")
 
-	room, err := third.Hold(todoText, &todo{}, warden.Keys{Secret: secret("far/room"), HeirSecret: secret("far/roomHeir")})
+	room, _, err := third.Hold(&todo{}, warden.Holding{
+		Blueprint: todoText,
+		Keys:      warden.Keys{Secret: secret("far/room"), HeirSecret: secret("far/roomHeir")},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	inv, err := third.Grant(room,
+	inv, err := third.GrantAs(room,
 		warden.Keys{Secret: secret("far/voice"), HeirSecret: secret("far/voiceHeir")},
 		third.Padlock(), []string{"https://far.example"})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	traveller, err := origin.Hold(todoText, &todo{}, warden.Keys{Secret: secret("origin/being"), HeirSecret: secret("origin/beingHeir")})
+	traveller, _, err := origin.Hold(&todo{}, warden.Holding{
+		Blueprint: todoText,
+		Keys:      warden.Keys{Secret: secret("origin/being"), HeirSecret: secret("origin/beingHeir")},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -755,14 +801,14 @@ func TestAMigratedRelationCanStillRotate(t *testing.T) {
 	// holds a commitment to a key nobody has spent yet, and only this ground
 	// has its secret.
 	first := secret("origin/firstHeir")
-	message, _, err := origin.Ask(secret("origin/ephemeral"), warden.Reach{
+	message, _, err := origin.Ask(warden.Reach{
 		Far: inv.Warden, Allowance: envelope.Allowance{Time: 5000, Hops: 8}, NextHeir: &first,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := third.Judge(warden.Draws{Ephemeral: secret("far/answerEphemeral")}, message); err != nil {
-		t.Fatalf("the far door refused the first rotation: %v", err)
+	if third.Arrive(message, nil) == nil {
+		t.Fatal("the far door refused the first rotation")
 	}
 
 	cargo, err := origin.Pack(traveller, []byte("state"))
@@ -783,7 +829,7 @@ func TestAMigratedRelationCanStillRotate(t *testing.T) {
 	// The origin lets the being go, and its relations go with it: the copy of
 	// that heir must not stay behind.
 	origin.Release(traveller)
-	if _, _, err := origin.Ask(secret("origin/ephemeral2"), warden.Reach{
+	if _, _, err := origin.Ask(warden.Reach{
 		Far: inv.Warden, Allowance: envelope.Allowance{Time: 5000, Hops: 8},
 	}); err == nil {
 		t.Fatal("the origin still holds a relation it handed over")
@@ -803,7 +849,7 @@ func TestAMigratedRelationCanStillRotate(t *testing.T) {
 	// being spends the heir it inherited, commits to one nobody has seen, and
 	// the far door answers.
 	next := secret("origin/secondHeir")
-	message, seq, err := g.w.Ask(secret("destination/ephemeral"), warden.Reach{
+	message, seq, err := g.w.Ask(warden.Reach{
 		Far: inv.Warden, Allowance: envelope.Allowance{Time: 5000, Hops: 8}, NextHeir: &next,
 	})
 	if err != nil {
@@ -812,11 +858,11 @@ func TestAMigratedRelationCanStillRotate(t *testing.T) {
 	if seq != 1 {
 		t.Fatalf("the rotation spent %d, want 1 — a rotation starts the count fresh", seq)
 	}
-	reply, err := third.Judge(warden.Draws{Ephemeral: secret("far/answerEphemeral2")}, message)
-	if err != nil {
-		t.Fatalf("the far door refused the arrived being's rotation: %v", err)
+	reply := third.Arrive(message, nil)
+	if reply == nil {
+		t.Fatal("the far door refused the arrived being's rotation")
 	}
-	answer, err := g.w.Hear(g.w.PadlockSecret(), reply)
+	answer, err := g.w.Hear(reply)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -843,21 +889,21 @@ func TestAMigratedRelationCanStillRotate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reply, err := third.Judge(warden.Draws{Ephemeral: secret("far/answerEphemeral4")}, dead); err == nil || reply != nil {
+	if reply := third.Arrive(dead, nil); reply != nil {
 		t.Fatal("the voice the being held before it moved still stands at the far door")
 	}
 
 	// And it can rotate again after that, because the row kept the new heir
 	// exactly as the origin's did.
 	third2 := secret("origin/thirdHeir")
-	message, _, err = g.w.Ask(secret("destination/ephemeral2"), warden.Reach{
+	message, _, err = g.w.Ask(warden.Reach{
 		Far: inv.Warden, Allowance: envelope.Allowance{Time: 5000, Hops: 8}, NextHeir: &third2,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := third.Judge(warden.Draws{Ephemeral: secret("far/answerEphemeral3")}, message); err != nil {
-		t.Fatalf("the far door refused the rotation after the migrated one: %v", err)
+	if third.Arrive(message, nil) == nil {
+		t.Fatal("the far door refused the rotation after the migrated one")
 	}
 }
 
@@ -876,7 +922,7 @@ func TestAHintIsCarriedByteForByte(t *testing.T) {
 		"https://two.example",
 	}
 
-	inv, err := g.w.Grant(g.being,
+	inv, err := g.w.GrantAs(g.being,
 		warden.Keys{Secret: secret("hintVoice"), HeirSecret: secret("hintHeir")},
 		g.w.Padlock(), hints)
 	if err != nil {
@@ -893,7 +939,7 @@ func TestAHintIsCarriedByteForByte(t *testing.T) {
 	// was told.
 	guest := house(t, "hintGuest")
 	guest.Stand(guest.Self(), inv, inv.HeirSecret)
-	_, _, _, kept, ok := guest.Relation(inv.Warden)
+	_, _, _, kept, ok := guest.RelationAt(inv.Warden)
 	if !ok || !reflect.DeepEqual(kept, hints) {
 		t.Fatalf("the row keeps %q", kept)
 	}
@@ -905,45 +951,35 @@ func TestAHintIsCarriedByteForByte(t *testing.T) {
 // heir takes the standing and commits to a voice the granter never saw, then
 // that voice commits to a fresh heir and carries the caller's own ask.
 func TestAcceptSpendsTheInvitationWhole(t *testing.T) {
-	g := stand(t)
-	guest := house(t, "acceptor")
-
-	args, err := wire.Encode(warden.Own, textType(), "milk")
+	delivery := warden.NewMemory()
+	g := standDelivered(t, delivery)
+	delivery.Attach("mem://whole", g.w)
+	g.w.Publish("mem://whole")
+	inv, err := g.w.GrantAs(g.being, warden.Keys{
+		Secret: secret("whole/voice"), HeirSecret: secret("whole/voiceHeir"),
+	}, g.w.Padlock(), g.w.Hints())
 	if err != nil {
 		t.Fatal(err)
 	}
-	taken, err := guest.Accept(g.inv, warden.Accepting{
-		Holder:      guest.Self(),
-		VoiceSecret: secret("acceptor/voice"),
-		HeirSecret:  secret("acceptor/heir"),
-		Being:       &g.being,
-		Method:      &envelope.Method{Name: "add", Args: args},
-		Allowance:   envelope.Allowance{Time: 5000, Hops: 8},
-		Ephemeral:   [2][32]byte{secret("acceptor/one"), secret("acceptor/two")},
-		Send: func(message []byte) ([]byte, error) {
-			return g.w.Judge(warden.Draws{Ephemeral: secret("answerEphemeral")}, message)
-		},
-	})
+
+	guest := housed(t, "acceptor", delivery)
+	handle, err := sole(guest.Accept(ctx(), inv, warden.Accepting{Label: "there"}))
 	if err != nil {
 		t.Fatalf("the invitation was not accepted: %v", err)
 	}
-
-	// The ask it carried was answered by the door it was sent to.
-	answer, err := guest.Hear(guest.PadlockSecret(), taken.Answer)
-	if err != nil {
-		t.Fatal(err)
+	// What comes back is what a being calls: the one being the standing opens,
+	// answering the field its blueprint declares.
+	if handle.Being() != g.being {
+		t.Fatal("the handle reaches a being the standing does not open")
 	}
-	if answer.Warden != g.w.Name() || answer.Seq != taken.Seq {
-		t.Fatalf("the answer is %#v", answer)
-	}
-	if !bytes.Equal(answer.Data, args) {
-		t.Fatalf("the being answered %x", answer.Data)
+	if v, ok := handle.Call(ctx(), "add", "milk"); !ok || v.(string) != "milk" {
+		t.Fatalf("the being answered %v %v", v, ok)
 	}
 
 	// Every key the granter ever held for this standing is dead: the voice it
 	// minted and the heir it handed out both stand nowhere now, which drops
 	// them to the stranger's case.
-	for _, dead := range [][32]byte{secret("voice"), g.inv.HeirSecret} {
+	for _, dead := range [][32]byte{secret("whole/voice"), inv.HeirSecret} {
 		s := g.say(arithmetic.SigningKey(dead), 7)
 		s.Being = &g.being
 		s.Method = &envelope.Method{Name: "count", Args: []byte{}}
@@ -952,18 +988,11 @@ func TestAcceptSpendsTheInvitationWhole(t *testing.T) {
 		g.silent(g.judge(dead, s))
 	}
 
-	// What stands is the key the caller generated, committed to an heir the
-	// granter never saw.
-	if taken.Voice != arithmetic.SigningKey(secret("acceptor/voice")) {
-		t.Fatal("the standing is not on the voice the caller minted")
-	}
-	if taken.Commitment != arithmetic.Commit(g.w.Name(), arithmetic.SigningKey(secret("acceptor/heir"))) {
-		t.Fatal("the commitment is not the caller's fresh heir at that door")
-	}
-	// And it goes on being spent: the heir it committed rotates in its turn.
+	// And the standing goes on being spent: the heir the accept committed to
+	// rotates in its turn, and starts the far door's count over.
 	third := secret("acceptor/third")
-	message, seq, err := guest.Ask(secret("acceptor/three"), warden.Reach{
-		Far: g.inv.Warden, Allowance: envelope.Allowance{Time: 5000, Hops: 8}, NextHeir: &third,
+	message, seq, err := guest.Ask(warden.Reach{
+		Far: inv.Warden, Allowance: envelope.Allowance{Time: 5000, Hops: 8}, NextHeir: &third,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -971,8 +1000,8 @@ func TestAcceptSpendsTheInvitationWhole(t *testing.T) {
 	if seq != 1 {
 		t.Fatalf("the rotation spent %d, want 1", seq)
 	}
-	if _, err := g.w.Judge(warden.Draws{Ephemeral: secret("answerEphemeral2")}, message); err != nil {
-		t.Fatalf("the door refused the rotation after the accept: %v", err)
+	if g.w.Arrive(message, nil) == nil {
+		t.Fatal("the door refused the rotation after the accept")
 	}
 }
 
@@ -981,29 +1010,27 @@ func TestAcceptSpendsTheInvitationWhole(t *testing.T) {
 // itself, whoever minted the invitation — or anyone holding a copy — can still
 // take the standing at that door.
 func TestACopyOfTheInvitationCanNoLongerTakeTheStanding(t *testing.T) {
-	g := stand(t)
-	guest := house(t, "acceptor")
-	if _, err := guest.Accept(g.inv, warden.Accepting{
-		Holder:      guest.Self(),
-		VoiceSecret: secret("acceptor/voice"),
-		HeirSecret:  secret("acceptor/heir"),
-		Being:       &g.being,
-		Method:      &envelope.Method{Name: "count", Args: []byte{}},
-		Allowance:   envelope.Allowance{Time: 5000, Hops: 8},
-		Ephemeral:   [2][32]byte{secret("acceptor/one"), secret("acceptor/two")},
-		Send: func(message []byte) ([]byte, error) {
-			return g.w.Judge(warden.Draws{Ephemeral: secret("answerEphemeral")}, message)
-		},
-	}); err != nil {
+	delivery := warden.NewMemory()
+	g := standDelivered(t, delivery)
+	delivery.Attach("mem://copy", g.w)
+	g.w.Publish("mem://copy")
+	inv, err := g.w.GrantAs(g.being, warden.Keys{
+		Secret: secret("copy/voice"), HeirSecret: secret("copy/voiceHeir"),
+	}, g.w.Padlock(), g.w.Hints())
+	if err != nil {
+		t.Fatal(err)
+	}
+	guest := housed(t, "acceptor", delivery)
+	if _, err := guest.Accept(ctx(), inv, warden.Accepting{Label: "there"}); err != nil {
 		t.Fatal(err)
 	}
 
 	// Somebody else holding the same invitation replays the holder's first act.
 	thief := house(t, "thief")
-	thief.Stand(thief.Self(), g.inv, g.inv.HeirSecret)
+	thief.Stand(thief.Self(), inv, inv.HeirSecret)
 	mine := secret("thief/heir")
-	message, _, err := thief.Ask(secret("thief/ephemeral"), warden.Reach{
-		Far: g.inv.Warden, Allowance: envelope.Allowance{Time: 5000, Hops: 8}, NextHeir: &mine,
+	message, _, err := thief.Ask(warden.Reach{
+		Far: inv.Warden, Allowance: envelope.Allowance{Time: 5000, Hops: 8}, NextHeir: &mine,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1012,8 +1039,8 @@ func TestACopyOfTheInvitationCanNoLongerTakeTheStanding(t *testing.T) {
 	// — the commitment it carries is ignored rather than refused. What matters
 	// is that it takes nothing: the standing stayed where the accept left it.
 	before := g.w.Standings(g.being)
-	if _, err := g.w.Judge(warden.Draws{Ephemeral: secret("answerEphemeral3")}, message); err != nil {
-		t.Fatalf("a stranger carrying a commitment met silence: %v", err)
+	if g.w.Arrive(message, nil) == nil {
+		t.Fatal("a stranger carrying a commitment met silence")
 	}
 	after := g.w.Standings(g.being)
 	if len(after) != len(before) {
@@ -1042,12 +1069,14 @@ func TestAPeerLearnsTheNewHouseFromTheDestinationItself(t *testing.T) {
 	origin := house(t, "whole/origin")
 	peer := house(t, "whole/peer")
 
-	traveller, err := origin.Hold(todoText, &todo{},
-		warden.Keys{Secret: secret("whole/being"), HeirSecret: secret("whole/beingHeir")})
+	traveller, _, err := origin.Hold(&todo{}, warden.Holding{
+		Blueprint: todoText,
+		Keys:      warden.Keys{Secret: secret("whole/being"), HeirSecret: secret("whole/beingHeir")},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	inv, err := origin.Grant(traveller,
+	inv, err := origin.GrantAs(traveller,
 		warden.Keys{Secret: secret("whole/voice"), HeirSecret: secret("whole/voiceHeir")},
 		origin.Padlock(), []string{"https://origin.example"})
 	if err != nil {
@@ -1058,7 +1087,7 @@ func TestAPeerLearnsTheNewHouseFromTheDestinationItself(t *testing.T) {
 	// The peer speaks once, which is how the origin learns the way back to it
 	// and how the standing changes hands. Both travel in the cargo.
 	next := secret("whole/peerHeir")
-	message, _, err := peer.Ask(secret("whole/ephemeral"), warden.Reach{
+	message, _, err := peer.Ask(warden.Reach{
 		Far:       origin.Name(),
 		Being:     &traveller,
 		Allowance: envelope.Allowance{Time: 5000, Hops: 8},
@@ -1068,8 +1097,8 @@ func TestAPeerLearnsTheNewHouseFromTheDestinationItself(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := origin.Judge(warden.Draws{Ephemeral: secret("whole/originEphemeral")}, message); err != nil {
-		t.Fatalf("the origin refused the peer: %v", err)
+	if origin.Arrive(message, nil) == nil {
+		t.Fatal("the origin refused the peer")
 	}
 	// The commitment a describe hands over, without which the peer holds no
 	// material to believe this being's succession.
@@ -1135,21 +1164,21 @@ func TestAPeerLearnsTheNewHouseFromTheDestinationItself(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, err := origin.News(secret("whole/firstNews"), warden.Tell{
+	first, err := origin.News(warden.Tell{
 		Peer: departed.Peers[0], Voice: departed.Voice, VoiceSecret: departed.VoiceSecret,
 		Word: departed.Word, Seq: 1, Allowance: envelope.Allowance{Time: 5000, Hops: 8},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := peer.Judge(warden.Draws{Ephemeral: secret("whole/peerEphemeral")}, first); err != nil {
-		t.Fatalf("the peer met the first news with silence: %v", err)
+	if peer.Arrive(first, nil) == nil {
+		t.Fatal("the peer met the first news with silence")
 	}
 
 	// And the second, from the new house itself, signed by the key it
 	// generated. A being's succession starts the news mark fresh, so it counts
 	// from one again.
-	second, err := g.w.News(secret("whole/secondNews"), warden.Tell{
+	second, err := g.w.News(warden.Tell{
 		Peer: landed.Peers[0], Voice: landed.Being, VoiceSecret: landed.BeingSecret,
 		Word: landed.Word, Seq: 1, Allowance: envelope.Allowance{Time: 5000, Hops: 8},
 		Hints: []string{"https://landing.example"},
@@ -1157,13 +1186,13 @@ func TestAPeerLearnsTheNewHouseFromTheDestinationItself(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := peer.Judge(warden.Draws{Ephemeral: secret("whole/peerEphemeral2")}, second); err != nil {
-		t.Fatalf("the peer met the second news with silence: %v", err)
+	if peer.Arrive(second, nil) == nil {
+		t.Fatal("the peer met the second news with silence")
 	}
 
 	// Believed news rewrites the row entire, so the peer now stands at the new
 	// house and reaches the being by the name that house minted.
-	name, held, padlock, hints, ok := peer.Relation(g.w.Name())
+	name, held, padlock, hints, ok := peer.RelationAt(g.w.Name())
 	if !ok || name != g.w.Name() || padlock != g.w.Padlock() {
 		t.Fatalf("the relation did not follow the being: %x %v", name, ok)
 	}
@@ -1183,7 +1212,7 @@ func TestAPeerLearnsTheNewHouseFromTheDestinationItself(t *testing.T) {
 		t.Fatal(err)
 	}
 	at := g.w.Name()
-	message, _, err = peer.Ask(secret("whole/ephemeral2"), warden.Reach{
+	message, _, err = peer.Ask(warden.Reach{
 		Far:       g.w.Name(),
 		Being:     &at,
 		Method:    &envelope.Method{Name: warden.FieldMoved, Args: arg},
@@ -1192,11 +1221,11 @@ func TestAPeerLearnsTheNewHouseFromTheDestinationItself(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reply, err := g.w.Judge(warden.Draws{Ephemeral: secret("whole/movedEphemeral")}, message)
-	if err != nil {
-		t.Fatalf("the destination met a holder's `moved` with silence: %v", err)
+	reply := g.w.Arrive(message, nil)
+	if reply == nil {
+		t.Fatal("the destination met a holder's `moved` with silence")
 	}
-	heard, err := peer.Hear(peer.PadlockSecret(), reply)
+	heard, err := peer.Hear(reply)
 	if err != nil {
 		t.Fatal(err)
 	}

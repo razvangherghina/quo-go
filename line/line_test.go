@@ -1,19 +1,18 @@
 package line_test
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"net"
-	"net/http/httptest"
 	"os"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
 	"quo.systems/kit/arithmetic"
-	"quo.systems/kit/carriage"
 	"quo.systems/kit/envelope"
 	"quo.systems/kit/line"
 	"quo.systems/kit/warden"
@@ -21,20 +20,17 @@ import (
 
 const todoText = "ToDo\n  add(title text) text\n  count() int\n"
 
-type todo struct{ items []string }
-
-func (o *todo) Invoke(call warden.Call) ([]byte, error) {
-	switch call.Method {
-	case "add":
-		o.items = append(o.items, string(call.Args[8:]))
-		return call.Args, nil
-	case "count":
-		out := make([]byte, 8)
-		binary.BigEndian.PutUint64(out, uint64(len(o.items)))
-		return out, nil
-	}
-	return nil, errors.New("the blueprint declares no such field")
+type todo struct {
+	warden.Attach
+	items []string
 }
+
+func (o *todo) Add(title string) string {
+	o.items = append(o.items, title)
+	return title
+}
+
+func (o *todo) Count() int64 { return int64(len(o.items)) }
 
 // secret is a fixed thirty-two byte draw, so nothing here is random or timed.
 func secret(label string) [32]byte { return arithmetic.Hash([]byte("quo-go-line/" + label)) }
@@ -51,12 +47,18 @@ func text(s string) []byte {
 func stand(t *testing.T, label string, limit int64) *warden.Warden {
 	t.Helper()
 	name := secret(label + "/name")
+	at := 0
 	w, err := warden.New(warden.Founding{
 		NameSecret:     name,
 		HeirCommitment: arithmetic.Commit(arithmetic.SigningKey(name), arithmetic.SigningKey(secret(label+"/wardenHeir"))),
 		PadlockSecret:  secret(label + "/padlock"),
 		Limit:          limit,
 		Clock:          func() int64 { return 1000 },
+		// A fixed sequence, so nothing here is random.
+		Random: func() [32]byte {
+			at++
+			return secret(fmt.Sprintf("%s/draw/%d", label, at))
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -64,31 +66,13 @@ func stand(t *testing.T, label string, limit int64) *warden.Warden {
 	return w
 }
 
-// door is one ground's half of a line: judgment with fixed draws, and the
-// opening of an answer under this ground's own padlock. A warden is not itself
-// concurrent, and one ground here holds several lines at once, so the two are
-// taken under one lock.
-func door(w *warden.Warden, label string) line.Door {
-	var mu sync.Mutex
+// door is one ground's half of a line, and the whole of it: the warden's one
+// entry point. The line reads nothing, holds no secret and opens no seal — it
+// hands the bytes over and writes back whatever comes.
+func door(w *warden.Warden) line.Door {
 	return line.Door{
-		Judge: func(message []byte) []byte {
-			mu.Lock()
-			defer mu.Unlock()
-			reply, err := w.Judge(warden.Draws{
-				Ephemeral: secret(label + "/answerEphemeral"),
-				Heir:      secret(label + "/receiveHeir"),
-			}, message)
-			if err != nil {
-				// Silence is the whole of every refusal, and on this carriage
-				// it has no wire form at all.
-				return nil
-			}
-			return reply
-		},
-		Hear: func(message []byte) (envelope.Answer, error) {
-			return envelope.OpenAnswer(w.PadlockSecret(), message)
-		},
-		Limit: w.Limit(),
+		Arrive: func(message []byte, via any) []byte { return w.Arrive(message, via) },
+		Limit:  w.Limit(),
 	}
 }
 
@@ -125,13 +109,18 @@ func dropped(t *testing.T, conn net.Conn) {
 	}
 }
 
-// waited reads one value off a carry, or reports that nothing came back.
-func waited(answers <-chan []byte) ([]byte, bool) {
-	select {
-	case reply := <-answers:
-		return reply, true
-	case <-time.After(300 * time.Millisecond):
-		return nil, false
+// quiet holds that nothing came back down a line within a moment. Silence has
+// no wire form here, so what a refusal looks like is no frame at all.
+func quiet(t *testing.T, l *line.Line, message []byte) {
+	t.Helper()
+	if !l.Carry(message) {
+		t.Fatal("the line would not carry it")
+	}
+	// Nothing here awaits anything, so what is being watched is the line: it
+	// keeps carrying, and no frame came back to be judged.
+	time.Sleep(200 * time.Millisecond)
+	if !l.Open() {
+		t.Fatal("an ordinary refusal dropped the line")
 	}
 }
 
@@ -168,12 +157,15 @@ func listening(t *testing.T, limit int64) *house {
 	t.Helper()
 	w := stand(t, "house", limit)
 	object := &todo{}
-	being, err := w.Hold(todoText, object, warden.Keys{Secret: secret("being"), HeirSecret: secret("beingHeir")})
+	being, _, err := w.Hold(object, warden.Holding{
+		Blueprint: todoText,
+		Keys:      warden.Keys{Secret: secret("being"), HeirSecret: secret("beingHeir")},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	accepted := make(chan *line.Line, 4)
-	listener, err := line.Listen(door(w, "house"), "127.0.0.1:0", func(l *line.Line) { accepted <- l })
+	listener, err := line.Listen(door(w), "127.0.0.1:0", func(l *line.Line) { accepted <- l })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +178,7 @@ func listening(t *testing.T, limit int64) *house {
 // a voice has seen its keys.
 func visiting(t *testing.T, h *house) (*warden.Warden, *line.Line) {
 	t.Helper()
-	inv, err := h.warden.Grant(h.being,
+	inv, err := h.warden.GrantAs(h.being,
 		warden.Keys{Secret: secret("voice"), HeirSecret: secret("voiceHeir")},
 		h.warden.Padlock(), []string{h.listener.Hint})
 	if err != nil {
@@ -194,7 +186,7 @@ func visiting(t *testing.T, h *house) (*warden.Warden, *line.Line) {
 	}
 	guest := stand(t, "guest", 1<<20)
 	guest.Stand(guest.Self(), inv, inv.HeirSecret)
-	l, err := line.Dial(door(guest, "guest"), h.listener.Hint)
+	l, err := line.Dial(door(guest), h.listener.Hint)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,20 +194,24 @@ func visiting(t *testing.T, h *house) (*warden.Warden, *line.Line) {
 	return guest, l
 }
 
-// ask seals one reach, carries it, and opens what comes back.
+// ask seals one reach, carries it, and waits for the answer the warden pairs
+// with it. The line never pairs anything: an answer arrives as a frame of its
+// own and goes in the same one entry point.
 func ask(t *testing.T, from *warden.Warden, l *line.Line, r warden.Reach) envelope.Answer {
 	t.Helper()
-	message, seq, err := from.Ask(secret("askEphemeral"), r)
+	message, seq, err := from.Ask(r)
 	if err != nil {
 		t.Fatal(err)
 	}
-	reply, came := waited(l.Carry(message, &line.Expect{Warden: r.Far, Seq: seq}))
-	if !came || reply == nil {
+	// The ask is held before the frame goes out, because the answer arrives as
+	// a frame of its own and may be judged before Carry returns.
+	pending := from.Expect(r.Far, seq, r.Padlock)
+	if !l.Carry(message) {
+		t.Fatal("the line would not carry the ask")
+	}
+	answer, heard := pending.Wait(context.Background(), 2000)
+	if !heard {
 		t.Fatal("nothing came back down the line")
-	}
-	answer, err := from.Hear(from.PadlockSecret(), reply)
-	if err != nil {
-		t.Fatal(err)
 	}
 	if answer.Seq != seq {
 		t.Fatalf("the answer names ask %d, not %d", answer.Seq, seq)
@@ -272,13 +268,16 @@ func TestAPushRidesBackDownADialledLine(t *testing.T) {
 	// The dialling ground holds a being of its own and has no road to give:
 	// it is reachable only down the lines it holds.
 	mine := &todo{}
-	being, err := guest.Hold(todoText, mine, warden.Keys{Secret: secret("guestBeing"), HeirSecret: secret("guestBeingHeir")})
+	being, _, err := guest.Hold(mine, warden.Holding{
+		Blueprint: todoText,
+		Keys:      warden.Keys{Secret: secret("guestBeing"), HeirSecret: secret("guestBeingHeir")},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	// The invitation it grants carries no hint, because the road is the line
 	// that is about to be open.
-	inv, err := guest.Grant(being,
+	inv, err := guest.GrantAs(being,
 		warden.Keys{Secret: secret("hostVoice"), HeirSecret: secret("hostVoiceHeir")},
 		guest.Padlock(), nil)
 	if err != nil {
@@ -289,9 +288,11 @@ func TestAPushRidesBackDownADialledLine(t *testing.T) {
 	}
 	h.warden.Stand(h.warden.Self(), inv, inv.HeirSecret)
 
-	if _, err := line.Dial(door(guest, "guest"), h.listener.Hint); err != nil {
+	dialled, err := line.Dial(door(guest), h.listener.Hint)
+	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(dialled.Close)
 
 	var accepted *line.Line
 	select {
@@ -339,20 +340,10 @@ func TestARefusedAskProducesNoFrame(t *testing.T) {
 	}
 
 	// A voice in neither record, at a being it does not reach.
-	if _, came := waited(l.Carry(stranger(t, h.warden, h.being), &line.Expect{Warden: h.warden.Name(), Seq: 1})); came {
-		t.Fatal("a refused ask was answered")
-	}
-	if !l.Open() {
-		t.Fatal("a refusal dropped the line")
-	}
+	quiet(t, l, stranger(t, h.warden, h.being))
 
 	// Bytes that are no box at all are the same ordinary silence.
-	if _, came := waited(l.Carry([]byte("not a box at all, but well framed"), &line.Expect{Warden: h.warden.Name(), Seq: 99})); came {
-		t.Fatal("noise was answered")
-	}
-	if !l.Open() {
-		t.Fatal("noise dropped the line")
-	}
+	quiet(t, l, []byte("not a box at all, but well framed"))
 
 	// And a later, legal ask down the same line still answers.
 	if later := ask(t, guest, l, warden.Reach{
@@ -360,39 +351,6 @@ func TestARefusedAskProducesNoFrame(t *testing.T) {
 		Allowance: envelope.Allowance{Time: 5000, Hops: 8},
 	}); later.Seq != 2 {
 		t.Fatalf("the later ask spent %d, want 2", later.Seq)
-	}
-}
-
-// TestAnIndistinguishableSecondAskIsNotSent holds the collision rule: two
-// voices, one return padlock, one far warden and one number would make two
-// answers indistinguishable, so the sender's own kit refuses to send the
-// second while the first waits.
-func TestAnIndistinguishableSecondAskIsNotSent(t *testing.T) {
-	h := listening(t, 1<<20)
-	_, l := visiting(t, h)
-
-	want := &line.Expect{Warden: h.warden.Name(), Seq: 1}
-	// A voice that stands nowhere, so nothing ever answers and the first ask
-	// stays awaiting.
-	waiting := l.Carry(stranger(t, h.warden, h.being), want)
-	second := l.Carry(stranger(t, h.warden, h.being), want)
-
-	// The second is refused where it stands, and answers the same nothing
-	// everything else does.
-	reply, came := waited(second)
-	if !came || reply != nil {
-		t.Fatal("the colliding ask was carried")
-	}
-	// The first is still waiting, and the line is still carrying.
-	if _, came := waited(waiting); came {
-		t.Fatal("the refused ask was answered")
-	}
-	if !l.Open() {
-		t.Fatal("refusing the second ask dropped the line")
-	}
-	// A different number collides with nothing.
-	if reply, came := waited(l.Carry(stranger(t, h.warden, h.being), &line.Expect{Warden: h.warden.Name(), Seq: 2})); came && reply != nil {
-		t.Fatal("a number that collides with nothing was refused")
 	}
 }
 
@@ -463,38 +421,41 @@ func TestABareHintPromisesTheDefault(t *testing.T) {
 	}
 }
 
-// TestAClosedLineResolvesItsPendingAsks holds that closing is the same nothing
-// a shut door gives, and that a dead line stays dead.
-func TestAClosedLineResolvesItsPendingAsks(t *testing.T) {
+// TestAClosedLineTakesNothing holds that a dead line stays dead: it carries
+// nothing more, and it says so where it stands rather than pretending.
+func TestAClosedLineTakesNothing(t *testing.T) {
 	h := listening(t, 1<<20)
 	_, l := visiting(t, h)
 
-	waiting := l.Carry(stranger(t, h.warden, h.being), &line.Expect{Warden: h.warden.Name(), Seq: 1})
 	l.Close()
-	if reply, came := waited(waiting); !came || reply != nil {
-		t.Fatal("a closed line left its pending ask hanging")
-	}
 	if l.Open() {
 		t.Fatal("a closed line is still open")
 	}
-	if reply, came := waited(l.Carry(stranger(t, h.warden, h.being), &line.Expect{Warden: h.warden.Name(), Seq: 2})); !came || reply != nil {
+	if l.Carry(stranger(t, h.warden, h.being)) {
 		t.Fatal("a dead line took an ask")
 	}
 }
 
 // TestARetractedRoadStopsCarrying holds that closing the listening half takes
-// every line it accepted with it, and the far end's pending ask resolves to the
-// same nothing.
+// every line it accepted with it, so the far end's next ask carries nowhere.
 func TestARetractedRoadStopsCarrying(t *testing.T) {
 	h := listening(t, 1<<20)
 	_, l := visiting(t, h)
 
-	waiting := l.Carry(stranger(t, h.warden, h.being), &line.Expect{Warden: h.warden.Name(), Seq: 1})
 	if err := h.listener.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if reply, came := waited(waiting); !came || reply != nil {
-		t.Fatal("a line whose road stopped carrying left its ask hanging")
+	// The far end learns by writing: the socket is gone, the write fails, and
+	// the line shuts itself.
+	for at := time.Now(); l.Open(); {
+		if time.Since(at) > 2*time.Second {
+			t.Fatal("a line whose road stopped carrying is still open")
+		}
+		l.Carry(stranger(t, h.warden, h.being))
+		time.Sleep(10 * time.Millisecond)
+	}
+	if l.Carry(stranger(t, h.warden, h.being)) {
+		t.Fatal("a line whose road stopped carrying took an ask")
 	}
 }
 
@@ -504,7 +465,7 @@ func TestARetractedRoadStopsCarrying(t *testing.T) {
 // small door stands one — and says its number on it.
 func TestADoorUnderTheDefaultDialsNoLine(t *testing.T) {
 	h := listening(t, 1<<20)
-	small := line.Door{Judge: func([]byte) []byte { return nil }, Limit: line.DEFAULT - 1}
+	small := line.Door{Arrive: func([]byte, any) []byte { return nil }, Limit: line.DEFAULT - 1}
 
 	if _, err := line.Dial(small, h.listener.Hint); !errors.Is(err, line.ErrUnderTheDefault) {
 		t.Fatalf("a door under the default dialled a line: %v", err)
@@ -520,7 +481,7 @@ func TestADoorUnderTheDefaultDialsNoLine(t *testing.T) {
 	}
 
 	// One byte lower than the default is under it; the default itself is not.
-	at := line.Door{Judge: func([]byte) []byte { return nil }, Limit: line.DEFAULT}
+	at := line.Door{Arrive: func([]byte, any) []byte { return nil }, Limit: line.DEFAULT}
 	if _, err := line.Dial(at, h.listener.Hint); err != nil {
 		t.Fatalf("a door at the default was refused: %v", err)
 	}
@@ -537,7 +498,7 @@ func TestADeclaredCapBoundsWhatTheDialerSends(t *testing.T) {
 	}
 
 	guest, l := visiting(t, h)
-	if reply, came := waited(l.Carry(make([]byte, 5000), nil)); !came || reply != nil {
+	if l.Carry(make([]byte, 5000)) {
 		t.Fatal("an envelope over the far cap was not refused at once")
 	}
 	if !l.Open() {
@@ -615,7 +576,7 @@ func TestAHintThatIsNotALineIsNotDialled(t *testing.T) {
 		"tcp://127.0.0.1:0",
 		"tcp://127.0.0.1:0?cap=16384",
 	} {
-		if _, err := line.Dial(door(guest, "guest"), hint); !errors.Is(err, line.ErrNotALine) {
+		if _, err := line.Dial(door(guest), hint); !errors.Is(err, line.ErrNotALine) {
 			t.Fatalf("%q was taken for a line: %v", hint, err)
 		}
 	}
@@ -652,7 +613,7 @@ func TestTheDiallingEndAcceptsTheDefaultAndNoMore(t *testing.T) {
 	// the frame carries; a body written after it would only race the drop.
 	frame := func(n int64, body bool) net.Conn {
 		t.Helper()
-		l, err := line.Dial(door(guest, "guest"), hint)
+		l, err := line.Dial(door(guest), hint)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -725,7 +686,7 @@ func TestADeadRoadIsWeatherRatherThanSilence(t *testing.T) {
 	if err := ears.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if l, err := line.Dial(door(guest, "guest"), "tcp://"+at); err == nil {
+	if l, err := line.Dial(door(guest), "tcp://"+at); err == nil {
 		l.Close()
 		t.Fatal("a dead road opened a line")
 	} else if errors.Is(err, line.ErrNotALine) {
@@ -734,7 +695,7 @@ func TestADeadRoadIsWeatherRatherThanSilence(t *testing.T) {
 
 	// And a name that does not resolve is the same weather, told apart from a
 	// hint this carriage does not speak.
-	if l, err := line.Dial(door(guest, "guest"), "tcp://no.such.host.invalid:9"); err == nil {
+	if l, err := line.Dial(door(guest), "tcp://no.such.host.invalid:9"); err == nil {
 		l.Close()
 		t.Fatal("an unresolvable name opened a line")
 	} else if errors.Is(err, line.ErrNotALine) {
@@ -742,106 +703,18 @@ func TestADeadRoadIsWeatherRatherThanSilence(t *testing.T) {
 	}
 }
 
-// TestACallerTakesTheRoadItCanSpeak holds the caller's whole job: a warden
-// offers as many roads as it has, and the caller takes the first one it can
-// speak that carried. Nothing at the call site says which, and nothing was
-// configured — in Go the answer is settled at build time, by whether the
-// program imports this package at all.
-func TestACallerTakesTheRoadItCanSpeak(t *testing.T) {
-	h := listening(t, 1<<20)
-
-	// The house stands on both roads at once and ranks neither: it offers what
-	// it has and the caller chooses.
-	carriageDoor := carriage.Handler(h.warden.Limit(), door(h.warden, "house").Judge)
-	served := httptest.NewServer(carriageDoor)
-	t.Cleanup(served.Close)
-	hints := []string{h.listener.Hint, served.URL}
-
-	inv, err := h.warden.Grant(h.being,
-		warden.Keys{Secret: secret("bothVoice"), HeirSecret: secret("bothVoiceHeir")},
-		h.warden.Padlock(), hints)
-	if err != nil {
-		t.Fatal(err)
+// TestOnlyALineIsALine holds the one fact about a hint this package offers
+// delivery, which is the thing that chooses among a peer's roads: whether this
+// carriage can speak it at all. Everything else about choosing is the host's.
+func TestOnlyALineIsALine(t *testing.T) {
+	for _, hint := range []string{"tcp://127.0.0.1:9", "tcp://one.example:443?cap=4096"} {
+		if !line.Speaks(hint) {
+			t.Fatalf("%q was not taken for a line", hint)
+		}
 	}
-	guest := stand(t, "guest", 1<<20)
-	guest.Stand(guest.Self(), inv, inv.HeirSecret)
-
-	// A caller holding a door has sockets under it, so it takes the tcp:// hint
-	// the house offered first — never told to, never asked.
-	mine := secret("bothHeir")
-	speaking := &line.Caller{Door: door(guest, "guest")}
-	t.Cleanup(speaking.HangUp)
-	message, seq, err := guest.Ask(secret("askEphemeral"), warden.Reach{
-		Far:       h.warden.Name(),
-		NextHeir:  &mine,
-		Allowance: envelope.Allowance{Time: 5000, Hops: 8},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	reply, err := speaking.Send(hints, message, &line.Expect{Warden: h.warden.Name(), Seq: seq})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if reply == nil {
-		t.Fatal("nothing came back")
-	}
-	if _, err := guest.Hear(guest.PadlockSecret(), reply); err != nil {
-		t.Fatal(err)
-	}
-	if len(h.listener.Lines()) != 1 {
-		t.Fatalf("the ask went down %d lines, want one", len(h.listener.Lines()))
-	}
-
-	// The same caller with no door cannot hold a line, so the tcp:// hint is a
-	// road it cannot speak. It walks past and posts, and no second connection
-	// was opened. The road was never the point: the seal is what proved it.
-	posting := &line.Caller{}
-	next := secret("bothHeirNext")
-	message, seq, err = guest.Ask(secret("askEphemeral2"), warden.Reach{
-		Far:       h.warden.Name(),
-		NextHeir:  &next,
-		Allowance: envelope.Allowance{Time: 5000, Hops: 8},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	reply, err = posting.Send(hints, message, &line.Expect{Warden: h.warden.Name(), Seq: seq})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if reply == nil {
-		t.Fatal("the carriage carried nothing")
-	}
-	if _, err := guest.Hear(guest.PadlockSecret(), reply); err != nil {
-		t.Fatal(err)
-	}
-	if len(h.listener.Lines()) != 1 {
-		t.Fatalf("a caller with no door opened %d lines", len(h.listener.Lines()))
-	}
-}
-
-// TestARoadTheCallerCannotSpeakIsNotARoadThatFailed holds the difference
-// between the three nothings. Nothing was sent down a road this caller cannot
-// speak, so no door spoke and no road broke: it is neither silence nor weather,
-// and it is never the fault reported at the end.
-func TestARoadTheCallerCannotSpeakIsNotARoadThatFailed(t *testing.T) {
-	posting := &line.Caller{}
-
-	// One road it cannot speak and one that is weather: what comes back is the
-	// weather, never the skip.
-	if _, err := posting.Send([]string{"tcp://127.0.0.1:9", "http://127.0.0.1:1/"},
-		[]byte("hello"), nil); err == nil {
-		t.Fatal("a dead road carried")
-	}
-
-	// And a list of nothing but roads it cannot speak is no road tried at all,
-	// which is not weather either: there is no fault to report the road of.
-	reply, err := posting.Send([]string{"tcp://127.0.0.1:9"}, []byte("hello"), nil)
-	if err != nil {
-		t.Fatalf("skipping every road was reported as weather: %v", err)
-	}
-	if reply != nil {
-		t.Fatal("a road nobody spoke carried bytes")
+	for _, hint := range []string{"http://one.example/", "https://one.example/", "mem://one", "pigeon://loft", ""} {
+		if line.Speaks(hint) {
+			t.Fatalf("%q was taken for a line", hint)
+		}
 	}
 }

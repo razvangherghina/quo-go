@@ -67,6 +67,27 @@ func Decode(bp *notation.Blueprint, t notation.Type, b []byte) (any, error) {
 	return v, nil
 }
 
+// DecodeAll reads one value of each type in turn out of one blob, and refuses
+// any byte left after the last. A field's arguments ride as its declared
+// argument types in declared order, concatenated, so this is how the receiving
+// side reads them — the arguments do not carry a count of their own, and the
+// blueprint is what says how many there are.
+func DecodeAll(bp *notation.Blueprint, ts []notation.Type, b []byte) ([]any, error) {
+	d := &decoder{b: b}
+	out := make([]any, 0, len(ts))
+	for _, t := range ts {
+		v, err := d.value(bp, t)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	if d.pos != len(d.b) {
+		return nil, errors.New("wire: bytes left over after the values")
+	}
+	return out, nil
+}
+
 func encode(bp *notation.Blueprint, t notation.Type, v any, out *[]byte) error {
 	switch t.Kind {
 	case notation.KindBool:

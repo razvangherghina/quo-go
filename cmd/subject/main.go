@@ -37,10 +37,30 @@
 // is the only line this command writes that is meant to be read by a machine
 // looking for it: every line it prints is one JSON object carrying the member
 // "quo".
+//
+// This command stands below the seam an application stands on, in two ways it
+// says here rather than hiding.
+//
+// It composes its own asks through the warden, with Ask, Expect and Forgo,
+// instead of calling fields on a handle. It has to: the whole point of it is to
+// name a being and a field it was handed on the command line, at a door whose
+// blueprints it does not hold, and a handle encodes through the blueprint and
+// so can never say them. The seam never grows a raw-ask surface to let it — an
+// application would then have a public way around the blueprint, permanently,
+// for the benefit of a harness.
+//
+// It also stands its own roads and its own delivery rather than opening a
+// host, which is the third part of the kit and does exactly that work. Here the
+// road is the thing under test: this command holds the line it dialled and
+// waits for the far ground to let it go, and holds the lines it accepted to
+// spend a standing down one. A host keeps its lines to itself, because a being
+// above it must never learn which road it is on; a subject exists to prove that
+// road, so it is one layer lower.
 package main
 
 import (
 	"bufio"
+	"context"
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
@@ -52,7 +72,6 @@ import (
 	"net/http"
 	"os"
 	"strings"
-	"sync"
 	"time"
 
 	"quo.systems/kit/arithmetic"
@@ -136,6 +155,9 @@ func serve(args []string) error {
 	if err != nil {
 		return err
 	}
+	// Silence is the whole of every refusal, and the reason never travels: the
+	// house is told inward, on this host's own stderr and nowhere else.
+	w.Observe(func(s warden.Silence) { fmt.Fprintln(os.Stderr, "subject: refused:", s.Reason) })
 	g := &ground{w: w}
 	// A relay has already spoken to a third house before it is ready to be
 	// spoken to, and what it found waits behind the facts: the facts line is
@@ -145,7 +167,7 @@ func serve(args []string) error {
 	if *relaying != "" {
 		being, found, err = relay(g, *relaying, *argsHex)
 	} else {
-		being, err = w.Hold(Counter, &counter{}, warden.Keys{Secret: draw(), HeirSecret: draw()})
+		being, _, err = w.Hold(&counter{}, warden.Holding{Blueprint: Counter})
 	}
 	if err != nil {
 		return err
@@ -167,7 +189,7 @@ func serve(args []string) error {
 		// The listening half is the one that knows where it ended up, so it is
 		// the one with a road to grant. Nothing above this changes: the same
 		// warden judges the same messages.
-		ears, err := line.Listen(line.Door{Judge: g.judge, Hear: g.hear, Limit: w.Limit()}, *listen, arriving)
+		ears, err := line.Listen(line.Door{Arrive: g.arrive, Limit: w.Limit()}, *listen, arriving)
 		if err != nil {
 			return err
 		}
@@ -204,7 +226,11 @@ func serve(args []string) error {
 	if err := emitFound(found); err != nil {
 		return err
 	}
-	return http.Serve(ln, carriage.Handler(w.Limit(), g.judge))
+	return http.Serve(ln, carriage.Handler(w.Limit(), func(message []byte) []byte {
+		// The common carriage holds no line, so there is no road token to hand
+		// down: an answer rides the response it came in on.
+		return g.arrive(message, nil)
+	}))
 }
 
 // What a relay found at the third house, printed once the facts are out.
@@ -218,7 +244,8 @@ func emitFound(found map[string]any) error {
 // stranger mints the invitation and prints the facts line: everything a
 // stranger needs to speak to this ground, over whichever road it was given.
 func stranger(w *warden.Warden, being [32]byte, hint string) error {
-	inv, err := w.Grant(being, warden.Keys{Secret: draw(), HeirSecret: draw()}, w.Padlock(), []string{hint})
+	w.Publish(hint)
+	inv, err := w.Grant(being)
 	if err != nil {
 		return err
 	}
@@ -234,49 +261,25 @@ func stranger(w *warden.Warden, being [32]byte, hint string) error {
 	})
 }
 
-// ground is this command's warden with the one lock that keeps it to itself. A
-// warden is not concurrent, and both roads reach it from several goroutines at
-// once: an HTTP door serves each request on its own, and a line judges arriving
-// frames on its reader while the main goroutine composes asks of its own.
+// ground is this command's warden. The warden holds its own lock, so there is
+// none here: both roads reach it from several goroutines at once, and an
+// arriving frame goes in its one entry point exactly as an HTTP body does.
 type ground struct {
-	w  *warden.Warden
-	mu sync.Mutex
+	w *warden.Warden
 }
 
-// judge is the whole of what a door does with an arriving message. Every draw
-// of randomness is taken as an argument rather than reached for, so the host
-// draws them here, once per judgment.
-func (g *ground) judge(message []byte) []byte {
-	g.mu.Lock()
-	reply, err := g.w.Judge(warden.Draws{Ephemeral: draw(), Heir: draw()}, message)
-	g.mu.Unlock()
-	if err != nil {
-		// Silence is the whole of every refusal, and the reason never travels.
-		// It goes to this host's own stderr and nowhere else.
-		fmt.Fprintln(os.Stderr, "subject: refused:", err)
-		return nil
-	}
-	return reply
+// arrive is the whole of what a road does with bytes: hands them to the
+// warden's one entry point and sends back whatever comes.
+func (g *ground) arrive(message []byte, via any) []byte {
+	return g.w.Arrive(message, via)
 }
 
 func (g *ground) ask(r warden.Reach) ([]byte, int64, error) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	return g.w.Ask(draw(), r)
-}
-
-// hear is the line's frame sorter and not the caller's judgment: it says
-// whether a frame is an answer sealed to this end, and spends nothing. The
-// judgment — the door match and the awaiting record — is the warden's own
-// Hear, taken where the ask was made.
-func (g *ground) hear(message []byte) (envelope.Answer, error) {
-	return envelope.OpenAnswer(g.w.PadlockSecret(), message)
+	return g.w.Ask(r)
 }
 
 func (g *ground) roads(far [32]byte) ([]string, bool) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	_, _, _, hints, ok := g.w.Relation(far)
+	_, _, _, hints, ok := g.w.RelationAt(far)
 	return hints, ok
 }
 
@@ -320,7 +323,7 @@ func speak(args []string) error {
 		if !ok {
 			return errors.New("those facts carry no tcp:// road")
 		}
-		dialled, err := line.Dial(line.Door{Judge: g.judge, Hear: g.hear, Limit: w.Limit()}, hint)
+		dialled, err := line.Dial(line.Door{Arrive: g.arrive, Limit: w.Limit()}, hint)
 		if err != nil {
 			return err
 		}
@@ -430,9 +433,7 @@ func pushes(g *ground, accepted <-chan *line.Line, beingHex, method, argsHex str
 }
 
 func push(g *ground, inv wire.Invitation, held *line.Line, beingHex, method, argsHex string) error {
-	g.mu.Lock()
 	g.w.Stand(g.w.Self(), inv, inv.HeirSecret)
-	g.mu.Unlock()
 	send := downLine(held)
 	classes, err := opening(g, inv.Warden, send)
 	if err != nil || classes == nil {
@@ -462,7 +463,7 @@ func relay(g *ground, written, entry string) ([32]byte, map[string]any, error) {
 		return [32]byte{}, nil, err
 	}
 	b := &brief{g: g, far: inv.Warden, hints: inv.Hints, voice: inv.Heir}
-	being, err := g.w.Hold(Brief, b, warden.Keys{Secret: draw(), HeirSecret: draw()})
+	being, _, err := g.w.Hold(b, warden.Holding{Blueprint: Brief})
 	if err != nil {
 		return [32]byte{}, nil, err
 	}
@@ -544,18 +545,12 @@ type brief struct {
 	voice [32]byte
 }
 
-func (b *brief) Invoke(call warden.Call) ([]byte, error) {
-	if call.Method != "filed" {
-		return nil, errors.New("the blueprint declares no such field")
-	}
-	if len(call.Args) != 0 {
-		return nil, errors.New("filed takes nothing")
-	}
-	leash := call.Leash
+func (b *brief) Filed(ctx context.Context) (int64, error) {
+	leash := warden.Of(ctx).Leash
 	received := leash.Received()
 	onward, err := leash.Onward()
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 	answer, err := b.send(warden.Reach{
 		Far:    b.far,
@@ -564,7 +559,7 @@ func (b *brief) Invoke(call warden.Call) ([]byte, error) {
 		Leash:  &leash,
 	})
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 	if err := emit(map[string]any{
 		"quo": 1, "step": "relayed",
@@ -574,40 +569,40 @@ func (b *brief) Invoke(call warden.Call) ([]byte, error) {
 		"onward":   map[string]any{"time": onward.Time, "hops": onward.Hops},
 		"silence":  answer == nil,
 	}); err != nil {
-		return nil, err
+		return 0, err
 	}
 	if answer == nil {
 		// Silence from the far house is silence from this one: a warden never
 		// narrates what happened behind it.
-		return nil, errors.New("the far house said nothing")
+		return 0, errors.New("the far house said nothing")
 	}
 	// Both fields ride as one `int`, so what the far house answered is already
 	// what this field answers with.
-	if _, err := readInt(answer.Data); err != nil {
-		return nil, err
-	}
-	return answer.Data, nil
+	return readInt(answer.Data)
 }
 
 // send is one errand at the far house, reported to nobody: the relay's own
-// conversation is not a step a driver reads. The warden is reached unlocked
-// because a call arrives with this ground's lock already taken — a being doing
-// its work is inside the judgment that routed to it.
+// conversation is not a step a driver reads. It is an ordinary spend down the
+// common carriage — a being in the middle of a chain reaches the next house
+// exactly as anybody does.
 func (b *brief) send(r warden.Reach) (*envelope.Answer, error) {
-	message, seq, err := b.g.w.Ask(draw(), r)
+	message, seq, err := b.g.w.Ask(r)
 	if err != nil {
 		return nil, err
 	}
+	pending := b.g.w.Expect(r.Far, seq, r.Padlock)
 	reply, err := carriage.Caller{}.Send(b.hints, message)
 	if err != nil {
 		return nil, err
 	}
-	if reply == nil {
-		return nil, nil
+	if reply != nil {
+		b.g.arrive(reply, nil)
+	} else {
+		b.g.w.Forgo(r.Far, seq, r.Padlock)
 	}
-	answer, err := b.g.w.Hear(b.g.w.PadlockSecret(), reply)
-	if err != nil {
-		return nil, err
+	answer, heard := pending.Wait(context.Background(), 10_000)
+	if !heard {
+		return nil, nil
 	}
 	if answer.Seq != seq {
 		return nil, fmt.Errorf("the answer names ask %d, not %d", answer.Seq, seq)
@@ -668,12 +663,13 @@ func invoke(g *ground, inv wire.Invitation, beingHex, method, argsHex string, cl
 // it stays for as long as the far ground keeps the line, and says what its own
 // object was left holding once the line is let go.
 func held(g *ground, far [32]byte, road *line.Line) error {
-	g.mu.Lock()
 	own := &counter{}
-	being, err := g.w.Hold(Counter, own, warden.Keys{Secret: draw(), HeirSecret: draw()})
+	being, _, err := g.w.Hold(own, warden.Holding{Blueprint: Counter})
 	if err == nil {
 		var inv wire.Invitation
-		inv, err = g.w.Grant(being, warden.Keys{Secret: draw(), HeirSecret: draw()}, g.w.Padlock(), []string{})
+		// This ground publishes no road, so the standing it hands back carries
+		// none: it is reachable only down the line it opened.
+		inv, err = g.w.GrantAs(being, warden.Keys{Secret: draw(), HeirSecret: draw()}, g.w.Padlock(), []string{})
 		if err == nil {
 			err = emit(map[string]any{
 				"quo": 1, "step": "standing", "far": hexOf(far),
@@ -685,7 +681,6 @@ func held(g *ground, far [32]byte, road *line.Line) error {
 			})
 		}
 	}
-	g.mu.Unlock()
 	if err != nil {
 		return err
 	}
@@ -699,9 +694,7 @@ func held(g *ground, far [32]byte, road *line.Line) error {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	g.mu.Lock()
-	total := own.total
-	g.mu.Unlock()
+	total := own.Count()
 	return emit(map[string]any{"quo": 1, "step": "held", "being": hexOf(being), "total": total})
 }
 
@@ -733,29 +726,27 @@ func (s *step) with(extra map[string]any) map[string]any {
 	return out
 }
 
-// sender is a road: it takes one composed message to the far ground and hands
-// back what came back, or nil for silence. The far warden and the number the
-// ask spent go with it because a line pairs an arriving answer by them — both
-// facts this caller's own, neither ever travelling outside a seal.
-type sender func(hints []string, message []byte, far [32]byte, seq int64) ([]byte, error)
+// sender is a road: it takes one composed message to the far ground. Bytes
+// back are a road that answered in its own response; no bytes and `later` is a
+// road that answers through the door as a frame of its own; neither is
+// weather. Nothing here opens a seal, and nothing here pairs an answer with an
+// ask — that is the warden's, because only the warden holds the secret.
+type sender func(hints []string, message []byte) (back []byte, later bool, err error)
 
 // byDoor is the common carriage: one message, one reply, and silence arrives
 // as an empty body because HTTP forces a response.
-func byDoor(hints []string, message []byte, _ [32]byte, _ int64) ([]byte, error) {
-	return carriage.Caller{}.Send(hints, message)
+func byDoor(hints []string, message []byte) ([]byte, bool, error) {
+	back, err := carriage.Caller{}.Send(hints, message)
+	return back, false, err
 }
 
 // downLine is the framed carriage, where the hints are already spent: the road
 // is the connection this ground is holding. Silence has no wire form here, so
-// nothing comes back at all and the deadline is this caller's own affair.
+// nothing comes back at all and the answer, when there is one, arrives as a
+// frame of its own through the warden's one entry point.
 func downLine(held *line.Line) sender {
-	return func(_ []string, message []byte, far [32]byte, seq int64) ([]byte, error) {
-		select {
-		case reply := <-held.Carry(message, &line.Expect{Warden: far, Seq: seq}):
-			return reply, nil
-		case <-time.After(10 * time.Second):
-			return nil, nil
-		}
+	return func(_ []string, message []byte) ([]byte, bool, error) {
+		return nil, held.Carry(message), nil
 	}
 }
 
@@ -774,29 +765,50 @@ func lineIn(hints []string) (string, bool) {
 // offered, and opens what came back. A nil step is silence, which is a door
 // speaking and not an error.
 func exchange(g *ground, far [32]byte, name string, r warden.Reach, send sender) (*step, error) {
-	message, seq, err := g.ask(r)
+	answer, seq, err := g.spend(far, r, send)
 	if err != nil {
 		return nil, err
+	}
+	if answer == nil {
+		return nil, emit(map[string]any{"quo": 1, "step": name, "seq": seq, "silence": true})
+	}
+	return &step{name: name, seq: seq, from: answer.Warden, data: answer.Data}, nil
+}
+
+// spend composes one ask, puts it on its road, and waits for the answer the
+// warden pairs with it. A nil answer is silence, which is a door speaking and
+// not an error.
+func (g *ground) spend(far [32]byte, r warden.Reach, send sender) (*envelope.Answer, int64, error) {
+	message, seq, err := g.ask(r)
+	if err != nil {
+		return nil, 0, err
 	}
 	hints, ok := g.roads(far)
 	if !ok {
-		return nil, errors.New("no relation with that house")
+		return nil, seq, errors.New("no relation with that house")
 	}
-	reply, err := send(hints, message, far, seq)
+	// The ask is held before the bytes go out, because the answer may be back
+	// before the sending returns — a road that answers in its own response, or
+	// a frame judged on this ground's own reader.
+	pending := g.w.Expect(far, seq, r.Padlock)
+	back, later, err := send(hints, message)
 	if err != nil {
-		return nil, err
+		return nil, seq, err
 	}
-	if reply == nil {
-		return nil, emit(map[string]any{"quo": 1, "step": name, "seq": seq, "silence": true})
+	switch {
+	case back != nil:
+		g.arrive(back, nil)
+	case !later:
+		g.w.Forgo(far, seq, r.Padlock)
 	}
-	answer, err := g.hear(reply)
-	if err != nil {
-		return nil, err
+	answer, heard := pending.Wait(context.Background(), 10_000)
+	if !heard {
+		return nil, seq, nil
 	}
 	if answer.Seq != seq {
-		return nil, fmt.Errorf("the answer names ask %d, not %d", answer.Seq, seq)
+		return nil, seq, fmt.Errorf("the answer names ask %d, not %d", answer.Seq, seq)
 	}
-	return &step{name: name, seq: seq, from: answer.Warden, data: answer.Data}, nil
+	return &answer, seq, nil
 }
 
 // class is one line of a describe, flattened for the far side: a digest and
@@ -898,38 +910,29 @@ func stand(limit int64) (*warden.Warden, error) {
 		HeirCommitment: arithmetic.Commit(arithmetic.SigningKey(name), arithmetic.SigningKey(draw())),
 		PadlockSecret:  draw(),
 		Limit:          limit,
-		// A clock is taken as an argument for the same reason a draw of
-		// randomness is. This host lends the warden the wall clock in
-		// milliseconds; only differences are ever taken of it.
-		Clock: func() int64 { return time.Now().UnixMilli() },
+		// A clock and a source of randomness are lent to the warden for its
+		// life, the way its keys are: an implementation that reached for
+		// either could not be pinned to a test. Only differences of the clock
+		// are ever taken of it.
+		Clock:  func() int64 { return time.Now().UnixMilli() },
+		Random: draw,
 	})
 }
 
 // counter is an ordinary object. It never learns it has an address, judges
-// nothing, and sees no key.
-type counter struct{ total int64 }
-
-func (c *counter) Invoke(call warden.Call) ([]byte, error) {
-	args := call.Args
-	switch call.Method {
-	case "bump":
-		if len(args) != 8 {
-			// Bytes left after the declared arguments are the being's to
-			// refuse, never the warden's.
-			return nil, errors.New("bump takes one int")
-		}
-		c.total += int64(binary.BigEndian.Uint64(args))
-	case "count":
-		if len(args) != 0 {
-			return nil, errors.New("count takes nothing")
-		}
-	default:
-		return nil, errors.New("the blueprint declares no such field")
-	}
-	out := make([]byte, 8)
-	binary.BigEndian.PutUint64(out, uint64(c.total))
-	return out, nil
+// nothing, sees no key and never touches a byte: its arguments arrive decoded
+// and its answers leave as plain values.
+type counter struct {
+	warden.Attach
+	total int64
 }
+
+func (c *counter) Bump(by int64) int64 {
+	c.total += by
+	return c.total
+}
+
+func (c *counter) Count() int64 { return c.total }
 
 func draw() [32]byte {
 	var b [32]byte

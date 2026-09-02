@@ -2,6 +2,7 @@ package carriage_test
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -16,18 +17,17 @@ import (
 
 const todoText = "ToDo\n  add(title text) text\n  count() int\n"
 
-type todo struct{ items []string }
-
-func (o *todo) Invoke(call warden.Call) ([]byte, error) {
-	switch call.Method {
-	case "add":
-		o.items = append(o.items, string(call.Args[8:]))
-		return call.Args, nil
-	case "count":
-		return []byte{0, 0, 0, 0, 0, 0, 0, byte(len(o.items))}, nil
-	}
-	return nil, errors.New("the blueprint declares no such field")
+type todo struct {
+	warden.Attach
+	items []string
 }
+
+func (o *todo) Add(title string) string {
+	o.items = append(o.items, title)
+	return title
+}
+
+func (o *todo) Count() int64 { return int64(len(o.items)) }
 
 // secret is a fixed thirty-two byte draw, so nothing here is random or timed.
 func secret(label string) [32]byte { return arithmetic.Hash([]byte("quo-go-carriage/" + label)) }
@@ -46,12 +46,18 @@ func stand(t *testing.T, label string) *warden.Warden {
 func standAt(t *testing.T, label string, clock func() int64) *warden.Warden {
 	t.Helper()
 	name := secret(label + "/name")
+	at := 0
 	w, err := warden.New(warden.Founding{
 		NameSecret:     name,
 		HeirCommitment: arithmetic.Commit(arithmetic.SigningKey(name), arithmetic.SigningKey(secret(label+"/wardenHeir"))),
 		PadlockSecret:  secret(label + "/padlock"),
 		Limit:          1 << 20,
 		Clock:          clock,
+		// A fixed sequence, so nothing here is random.
+		Random: func() [32]byte {
+			at++
+			return secret(fmt.Sprintf("%s/draw/%d", label, at))
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -64,18 +70,15 @@ func standAt(t *testing.T, label string, clock func() int64) *warden.Warden {
 func serve(t *testing.T, w *warden.Warden, label string) *httptest.Server {
 	t.Helper()
 	n := 0
+	w.Observe(func(s warden.Silence) {
+		// Silence is the whole of every refusal, and the reason stays here.
+		t.Logf("%s refused a message: %v", label, s.Reason)
+	})
 	s := httptest.NewServer(carriage.Handler(w.Limit(), func(message []byte) []byte {
 		n++
-		reply, err := w.Judge(warden.Draws{
-			Ephemeral: secret(label + "/answerEphemeral"),
-			Heir:      secret(label + "/receiveHeir"),
-		}, message)
-		if err != nil {
-			// Silence is the whole of every refusal, and the reason stays here.
-			t.Logf("%s refused message %d: %v", label, n, err)
-			return nil
-		}
-		return reply
+		// The common carriage holds no line, so there is no road token to hand
+		// down: an answer rides the response it came in on.
+		return w.Arrive(message, nil)
 	}))
 	t.Cleanup(s.Close)
 	return s
@@ -86,13 +89,16 @@ func serve(t *testing.T, w *warden.Warden, label string) *httptest.Server {
 // bytes and nothing else, and the door's answer comes back in the body.
 func TestOneMessageCrossesTheCarriage(t *testing.T) {
 	house := stand(t, "house")
-	being, err := house.Hold(todoText, &todo{}, warden.Keys{Secret: secret("being"), HeirSecret: secret("beingHeir")})
+	being, _, err := house.Hold(&todo{}, warden.Holding{
+		Blueprint: todoText,
+		Keys:      warden.Keys{Secret: secret("being"), HeirSecret: secret("beingHeir")},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	door := serve(t, house, "house")
 
-	inv, err := house.Grant(being,
+	inv, err := house.GrantAs(being,
 		warden.Keys{Secret: secret("voice"), HeirSecret: secret("voiceHeir")},
 		house.Padlock(), []string{door.URL})
 	if err != nil {
@@ -109,7 +115,7 @@ func TestOneMessageCrossesTheCarriage(t *testing.T) {
 	// Claiming a standing the moment the secret arrives is legal and
 	// observable: rotate, ask nothing, and what comes back is what you stand
 	// at.
-	message, seq, err := caller.Ask(secret("askEphemeral"), warden.Reach{
+	message, seq, err := caller.Ask(warden.Reach{
 		Far:       inv.Warden,
 		Allowance: envelope.Allowance{Time: 5000, Hops: 8},
 		Hints:     []string{"https://caller.example"},
@@ -130,7 +136,7 @@ func TestOneMessageCrossesTheCarriage(t *testing.T) {
 		t.Fatal("the door answered silence")
 	}
 
-	answer, err := caller.Hear(caller.PadlockSecret(), reply)
+	answer, err := caller.Hear(reply)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,12 +165,15 @@ func TestOneMessageCrossesTheCarriage(t *testing.T) {
 // voice across the carriage, and that the door spends each number once.
 func TestTheSecondAskContinuesTheCount(t *testing.T) {
 	house := stand(t, "house")
-	being, err := house.Hold(todoText, &todo{}, warden.Keys{Secret: secret("being"), HeirSecret: secret("beingHeir")})
+	being, _, err := house.Hold(&todo{}, warden.Holding{
+		Blueprint: todoText,
+		Keys:      warden.Keys{Secret: secret("being"), HeirSecret: secret("beingHeir")},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	door := serve(t, house, "house")
-	inv, err := house.Grant(being,
+	inv, err := house.GrantAs(being,
 		warden.Keys{Secret: secret("voice"), HeirSecret: secret("voiceHeir")},
 		house.Padlock(), []string{door.URL})
 	if err != nil {
@@ -177,7 +186,7 @@ func TestTheSecondAskContinuesTheCount(t *testing.T) {
 
 	ask := func(r warden.Reach) (envelope.Answer, []byte) {
 		t.Helper()
-		message, _, err := caller.Ask(secret("askEphemeral"), r)
+		message, _, err := caller.Ask(r)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -188,7 +197,7 @@ func TestTheSecondAskContinuesTheCount(t *testing.T) {
 		if reply == nil {
 			t.Fatal("the door answered silence")
 		}
-		a, err := caller.Hear(caller.PadlockSecret(), reply)
+		a, err := caller.Hear(reply)
 		if err != nil {
 			t.Fatal(err)
 		}

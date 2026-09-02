@@ -2,7 +2,7 @@ package warden_test
 
 import (
 	"bytes"
-	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -18,12 +18,17 @@ import (
 
 const todoText = "ToDo\n  add(title text) text\n  count() int\n"
 
-type todo struct{ items []string }
+// todo is an ordinary Go value. Its arguments arrive decoded and its answers
+// leave as plain values: it never sees a byte, a key or a road.
+type todo struct {
+	warden.Attach
+	items []string
+}
 
 // todoFrom is what a house that welcomes this class does with a cargo: it makes
 // the being from the cells that travelled with it, which is the whole of what
 // the origin sent that is not identity or record.
-func todoFrom(cells []byte) (warden.Being, error) {
+func todoFrom(cells []byte) (any, error) {
 	o := &todo{}
 	if len(cells) > 0 {
 		o.items = strings.Split(string(cells), "\n")
@@ -31,16 +36,12 @@ func todoFrom(cells []byte) (warden.Being, error) {
 	return o, nil
 }
 
-func (o *todo) Invoke(call warden.Call) ([]byte, error) {
-	switch call.Method {
-	case "add":
-		o.items = append(o.items, string(call.Args[8:]))
-		return call.Args, nil
-	case "count":
-		return []byte{0, 0, 0, 0, 0, 0, 0, byte(len(o.items))}, nil
-	}
-	return nil, errors.New("the blueprint declares no such field")
+func (o *todo) Add(title string) string {
+	o.items = append(o.items, title)
+	return title
 }
+
+func (o *todo) Count() int64 { return int64(len(o.items)) }
 
 // keyType and textType are the two argument types this bench encodes by hand.
 func keyType() notation.Type  { return notation.Type{Kind: notation.KindB32} }
@@ -57,6 +58,16 @@ type tick struct{ ms int64 }
 func (c *tick) read() int64   { return c.ms }
 func (c *tick) step(ms int64) { c.ms += ms }
 
+// fixed is the randomness a door with nothing to assert about its draws is
+// handed: a sequence, so nothing here is random and two runs are one run.
+func fixed(label string) func() [32]byte {
+	at := 0
+	return func() [32]byte {
+		at++
+		return secret(fmt.Sprintf("%s/draw/%d", label, at))
+	}
+}
+
 type ground struct {
 	t        *testing.T
 	w        *warden.Warden
@@ -65,27 +76,64 @@ type ground struct {
 	inv      wire.Invitation
 	returned [32]byte // the caller's return padlock
 	opens    [32]byte // and the secret that opens what comes back to it
+	// supply is the randomness this door was handed at open, primed per
+	// judgment in the order a judgment draws: the answer's ephemeral key
+	// first, then the two keys a receive mints. A bench that could not name
+	// them could not assert what a receive did with them.
+	supply []([32]byte)
+	drawn  int
+}
+
+// draw is the door's randomness. What the case in hand primed comes first, and
+// anything drawn past it is a fixed sequence, so nothing here is random.
+func (g *ground) draw() [32]byte {
+	if len(g.supply) > 0 {
+		one := g.supply[0]
+		g.supply = g.supply[1:]
+		return one
+	}
+	g.drawn++
+	return secret(fmt.Sprintf("draw/%d", g.drawn))
 }
 
 func stand(t *testing.T) *ground {
 	t.Helper()
-	return standLimited(t, 1<<20)
+	return standWith(t, 1<<20, nil)
 }
 
 func standLimited(t *testing.T, limit int64) *ground {
 	t.Helper()
+	return standWith(t, limit, nil)
+}
+
+// standDelivered is stand with delivery handed in, for the cases where this
+// ground has to be able to speak first.
+func standDelivered(t *testing.T, delivery warden.Delivery) *ground {
+	t.Helper()
+	return standWith(t, 1<<20, delivery)
+}
+
+func standWith(t *testing.T, limit int64, delivery warden.Delivery) *ground {
+	t.Helper()
 	clock := &tick{}
+	g := &ground{t: t, clock: clock}
 	w, err := warden.New(warden.Founding{
 		NameSecret:     secret("name"),
 		HeirCommitment: arithmetic.Commit(arithmetic.SigningKey(secret("name")), arithmetic.SigningKey(secret("wardenHeir"))),
 		PadlockSecret:  secret("padlock"),
 		Limit:          limit,
 		Clock:          clock.read,
+		Random:         g.draw,
+		Delivery:       delivery,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	being, err := w.Hold(todoText, &todo{}, warden.Keys{Secret: secret("being"), HeirSecret: secret("beingHeir")})
+	g.w = w
+	being, _, err := w.Hold(&todo{}, warden.Holding{
+		Blueprint: todoText,
+		Keys:      warden.Keys{Secret: secret("being"), HeirSecret: secret("beingHeir")},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,11 +146,12 @@ func standLimited(t *testing.T, limit int64) *ground {
 	if err != nil {
 		t.Fatal(err)
 	}
-	inv, err := w.Grant(being, warden.Keys{Secret: secret("voice"), HeirSecret: secret("voiceHeir")}, w.Padlock(), []string{"https://one.example"})
+	inv, err := w.GrantAs(being, warden.Keys{Secret: secret("voice"), HeirSecret: secret("voiceHeir")}, w.Padlock(), []string{"https://one.example"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &ground{t: t, w: w, clock: clock, being: being, inv: inv, returned: returned, opens: secret("returnPadlock")}
+	g.being, g.inv, g.returned, g.opens = being, inv, returned, secret("returnPadlock")
+	return g
 }
 
 // say builds a well-formed utterance to this door, which each case then bends.
@@ -126,20 +175,24 @@ func (g *ground) own() *[32]byte {
 }
 
 // judge seals a say under the signer's key and runs the eight steps over it.
-func (g *ground) judge(signer [32]byte, s envelope.Say) ([]byte, error) {
+func (g *ground) judge(signer [32]byte, s envelope.Say) []byte {
 	g.t.Helper()
 	message, err := envelope.SealSay(secret("ephemeral"), g.w.Padlock(), signer, s)
 	if err != nil {
 		g.t.Fatal(err)
 	}
-	return g.w.Judge(warden.Draws{Ephemeral: secret("answerEphemeral"), Being: secret("receiveBeing"), Heir: secret("receiveHeir")}, message)
+	// The keys this judgment may draw, in the order it draws them.
+	g.supply = []([32]byte){secret("answerEphemeral"), secret("receiveBeing"), secret("receiveHeir")}
+	reply := g.w.Arrive(message, nil)
+	g.supply = nil
+	return reply
 }
 
 // answer opens what came back and hands over the data the field answered.
-func (g *ground) answer(reply []byte, err error) []byte {
+func (g *ground) answer(reply []byte) []byte {
 	g.t.Helper()
-	if err != nil {
-		g.t.Fatalf("silence where an answer was due: %v", err)
+	if reply == nil {
+		g.t.Fatal("silence where an answer was due")
 	}
 	a, err := envelope.OpenAnswer(g.opens, reply)
 	if err != nil {
@@ -151,10 +204,12 @@ func (g *ground) answer(reply []byte, err error) []byte {
 	return a.Data
 }
 
-// silent asserts the whole of every refusal: no answer, and no reason on the wire.
-func (g *ground) silent(reply []byte, err error) {
+// silent asserts the whole of every refusal, which is what the wire gets: no
+// answer and no word about which step it was. Why the door fell silent is the
+// house's own channel, asserted where a case registers one.
+func (g *ground) silent(reply []byte) {
 	g.t.Helper()
-	if err == nil || reply != nil {
+	if reply != nil {
 		g.t.Fatal("a door that should have said nothing spoke")
 	}
 }
@@ -275,9 +330,7 @@ func TestAnArrivingCallWithEmptyHintsLeavesTheWayBackStanding(t *testing.T) {
 	s := g.say(g.inv.Heir, 2)
 	s.Being = g.own()
 	s.Method = &envelope.Method{Name: warden.FieldLimit}
-	if _, err := g.judge(g.inv.HeirSecret, s); err != nil {
-		t.Fatalf("silence where an answer was due: %v", err)
-	}
+	g.answer(g.judge(g.inv.HeirSecret, s))
 	if roads := g.roads(); len(roads) != 1 || roads[0] != "https://caller.example" {
 		t.Fatalf("the way back did not take the road the call carried: %v", roads)
 	}
@@ -286,9 +339,7 @@ func TestAnArrivingCallWithEmptyHintsLeavesTheWayBackStanding(t *testing.T) {
 	empty.Hints = nil
 	empty.Being = g.own()
 	empty.Method = &envelope.Method{Name: warden.FieldLimit}
-	if _, err := g.judge(g.inv.HeirSecret, empty); err != nil {
-		t.Fatalf("silence where an answer was due: %v", err)
-	}
+	g.answer(g.judge(g.inv.HeirSecret, empty))
 	if roads := g.roads(); len(roads) != 1 || roads[0] != "https://caller.example" {
 		t.Fatalf("an empty hints list erased the way back: %v", roads)
 	}
@@ -310,8 +361,8 @@ func TestTheWayBackIsRefreshedBetweenTheSeqAndTheLeash(t *testing.T) {
 	// The answer is sealed to the padlock the call carried, so it is not this
 	// bench's to open. That it was answered at all is the whole of what this
 	// step needs.
-	if _, err := g.judge(secret("voiceHeir"), s); err != nil {
-		t.Fatalf("silence where an answer was due: %v", err)
+	if g.judge(secret("voiceHeir"), s) == nil {
+		t.Fatal("silence where an answer was due")
 	}
 	if g.wayBack() != live {
 		t.Fatal("the way back did not move to what the call carried")
@@ -628,7 +679,7 @@ func TestMovedAnswersAbsence(t *testing.T) {
 
 	successor := arithmetic.SigningKey(secret("successor"))
 	next := arithmetic.Commit(successor, successor)
-	g.w.Publish(g.being, warden.Word{
+	g.w.Point(g.being, warden.Word{
 		Being: &g.being, Successor: &successor, Commitment: &next, Hints: []string{"https://new.example"},
 	})
 	s = g.say(g.inv.Heir, 3)
@@ -665,6 +716,7 @@ func TestNewsIsBelievedByAKeyAlreadyHeld(t *testing.T) {
 		HeirCommitment: arithmetic.Commit(arithmetic.SigningKey(secret("peerName")), arithmetic.SigningKey(secret("peerHeir"))),
 		PadlockSecret:  secret("peerPadlock"),
 		Clock:          (&tick{}).read,
+		Random:         fixed("peer"),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -689,7 +741,7 @@ func TestNewsIsBelievedByAKeyAlreadyHeld(t *testing.T) {
 		Hints:      []string{"https://far.example"},
 	}, secret("peerVoice"))
 
-	tell := func(signer [32]byte, seq int64, word warden.Word) ([]byte, error) {
+	tell := func(signer [32]byte, seq int64, word warden.Word) []byte {
 		t.Helper()
 		args, err := warden.EncodeWord(word)
 		if err != nil {
@@ -710,7 +762,7 @@ func TestNewsIsBelievedByAKeyAlreadyHeld(t *testing.T) {
 	if data := g.answer(tell(secret("farName"), 1, warden.Word{Padlock: &lock})); data != nil {
 		t.Fatalf("tell answered %x where it answers nothing", data)
 	}
-	if _, _, padlock, _, _ := peer.Relation(far); padlock != lock {
+	if _, _, padlock, _, _ := peer.RelationAt(far); padlock != lock {
 		t.Fatal("the padlock was not replaced")
 	}
 
@@ -751,10 +803,10 @@ func TestNewsIsBelievedByAKeyAlreadyHeld(t *testing.T) {
 	g.answer(tell(secret("farHeir"), 1, warden.Word{
 		Successor: &farHeir, Commitment: &next, Name: &farHeir,
 	}))
-	if _, commitment, _, _, ok := peer.Relation(farHeir); !ok || commitment != next {
+	if _, commitment, _, _, ok := peer.RelationAt(farHeir); !ok || commitment != next {
 		t.Fatal("the relation was not rewritten onto the successor")
 	}
-	if _, _, _, _, ok := peer.Relation(far); ok {
+	if _, _, _, _, ok := peer.RelationAt(far); ok {
 		t.Fatal("the dead name still names a relation")
 	}
 
@@ -783,7 +835,7 @@ func TestNewsIsBelievedByAKeyAlreadyHeld(t *testing.T) {
 		Being: &farHeir, Successor: &nextHeir, Commitment: &afterNext,
 	}))
 	// And the row is untouched: the succession said the other way still stands.
-	if _, commitment, _, _, ok := peer.Relation(farHeir); !ok || commitment != next {
+	if _, commitment, _, _, ok := peer.RelationAt(farHeir); !ok || commitment != next {
 		t.Fatal("a refused word moved the relation")
 	}
 
@@ -799,7 +851,7 @@ func TestNewsIsBelievedByAKeyAlreadyHeld(t *testing.T) {
 		t.Fatal(err)
 	}
 	g.silent(tell(secret("farHeir2"), 5, warden.Word{Padlock: &stolen}))
-	if _, _, padlock, _, _ := peer.Relation(farHeir); padlock != lock2 {
+	if _, _, padlock, _, _ := peer.RelationAt(farHeir); padlock != lock2 {
 		t.Fatal("the committed heir replaced the house's lock at this peer")
 	}
 	// The name signs the same word and it is believed, so what refused the
@@ -807,7 +859,7 @@ func TestNewsIsBelievedByAKeyAlreadyHeld(t *testing.T) {
 	if data := g.answer(tell(secret("farHeir"), 6, warden.Word{Padlock: &stolen})); data != nil {
 		t.Fatalf("tell answered %x where it answers nothing", data)
 	}
-	if _, _, padlock, _, _ := peer.Relation(farHeir); padlock != stolen {
+	if _, _, padlock, _, _ := peer.RelationAt(farHeir); padlock != stolen {
 		t.Fatal("the name could not replace its own lock")
 	}
 
@@ -819,10 +871,10 @@ func TestNewsIsBelievedByAKeyAlreadyHeld(t *testing.T) {
 	g.silent(tell(secret("farHeir2"), 7, warden.Word{
 		Successor: &thief, Commitment: &theirs, Name: &thief,
 	}))
-	if _, _, _, _, ok := peer.Relation(thief); ok {
+	if _, _, _, _, ok := peer.RelationAt(thief); ok {
 		t.Fatal("a key that never signed for it was handed the relation")
 	}
-	if _, commitment, _, _, ok := peer.Relation(farHeir); !ok || commitment != next {
+	if _, commitment, _, _, ok := peer.RelationAt(farHeir); !ok || commitment != next {
 		t.Fatal("a refused word moved the relation")
 	}
 
@@ -847,7 +899,7 @@ func TestNewsIsBelievedByAKeyAlreadyHeld(t *testing.T) {
 	}
 	// And the field decided nothing: the row's commitment is what the word
 	// last said, never what the envelope carried.
-	if _, commitment, _, _, ok := peer.Relation(farHeir); !ok || commitment != next {
+	if _, commitment, _, _, ok := peer.RelationAt(farHeir); !ok || commitment != next {
 		t.Fatal("a commitment on a news envelope was read as a claim")
 	}
 }
@@ -861,6 +913,7 @@ func TestABeingSuccessionNeedsItsOwnCommitment(t *testing.T) {
 		HeirCommitment: arithmetic.Commit(arithmetic.SigningKey(secret("peer2Name")), arithmetic.SigningKey(secret("peer2Heir"))),
 		PadlockSecret:  secret("peer2Padlock"),
 		Clock:          (&tick{}).read,
+		Random:         fixed("peer2"),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -888,7 +941,7 @@ func TestABeingSuccessionNeedsItsOwnCommitment(t *testing.T) {
 	nextCommitment := arithmetic.Commit(beingHeir, beingHeir)
 	word := warden.Word{Being: &being, Successor: &beingHeir, Commitment: &nextCommitment}
 
-	tell := func(signer [32]byte, seq int64) ([]byte, error) {
+	tell := func(signer [32]byte, seq int64) []byte {
 		t.Helper()
 		args, err := warden.EncodeWord(word)
 		if err != nil {
@@ -1108,7 +1161,7 @@ func TestDistanceZeroWaivesNoStepOfTheJudgment(t *testing.T) {
 	}
 	bent := append([]byte(nil), message...)
 	bent[len(bent)-1] ^= 1
-	g.silent(g.w.Judge(warden.Draws{Ephemeral: secret("answerEphemeral"), Being: secret("receiveBeing"), Heir: secret("receiveHeir")}, bent))
+	g.silent(g.w.Arrive(bent, nil))
 
 	// A replayed envelope meets silence too: the same seq handed to the
 	// judge a second time, in the very process that spent it, is still
@@ -1132,19 +1185,17 @@ func TestThePublishedLimitBindsWhereThereIsNoRoad(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	draws := warden.Draws{Ephemeral: secret("answerEphemeral"), Being: secret("receiveBeing"), Heir: secret("receiveHeir")}
-
 	// A byte over the limit is silence, and it is silence before the record is
 	// touched: the same envelope is honoured when the limit admits it, which
 	// it could not be had the refused one spent its number.
 	over := standLimited(t, int64(len(message))-1)
 	over.rotate(1)
-	over.silent(over.w.Judge(draws, message))
+	over.silent(over.w.Arrive(message, nil))
 
 	exact := standLimited(t, int64(len(message)))
 	exact.rotate(1)
-	if back, err := exact.w.Judge(draws, message); err != nil || back == nil {
-		t.Fatalf("the limit is inclusive, and this door refused its own largest message: %v", err)
+	if back := exact.w.Arrive(message, nil); back == nil {
+		t.Fatal("the limit is inclusive, and this door refused its own largest message")
 	}
 }
 

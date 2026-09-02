@@ -35,9 +35,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-
-	"quo.systems/kit/carriage"
-	"quo.systems/kit/envelope"
 )
 
 // length is the frame header: eight bytes, the way Article V writes an int.
@@ -61,26 +58,17 @@ const DEFAULT int64 = 16384
 // the open, because such an end never had a line to fail on mid-frame.
 var ErrUnderTheDefault = errors.New("line: a door under the default declares no cap and offers no line")
 
-// Door is what a line hands its arriving frames to. Both halves are the host's
-// closures for the same reason the common carriage takes one: a judgment needs
-// randomness the host draws, and opening an answer needs a padlock secret,
-// neither of which a carriage may reach for.
+// Door is where a line hands every frame it reads. A line never opens a seal:
+// it cannot tell an ask from an answer, does not want to, and holds no secret
+// with which it could find out. It hands the bytes to the warden's one entry
+// point and writes back whatever bytes come.
 type Door struct {
-	// Judge takes an arriving say and hands back the sealed answer, or nil for
-	// silence — which on this carriage produces no frame at all. It is the same
-	// door the common carriage answers with.
-	Judge carriage.Answer
-
-	// Hear opens an arriving frame as an answer sealed to this end, under the
-	// padlock secret the asks from this end named. The error is the ordinary
-	// "this was not an answer to me", which is most frames.
-	//
-	// It tells the two records apart and nothing more, so it is
-	// envelope.OpenAnswer and never the warden's own Hear: judging an answer
-	// spends the awaiting record the caller keeps for it, and a road that
-	// spent it while sorting frames would leave nothing for the caller to
-	// judge. The road demultiplexes; the caller judges.
-	Hear func(message []byte) (envelope.Answer, error)
+	// Arrive is the warden's one entry point. The bytes that arrived go in
+	// beside the line they arrived on — an opaque token the warden never reads
+	// and hands straight back to delivery — and the sealed answer, or nothing,
+	// comes out. Nothing comes out for an answer, because an answer settles the
+	// ask awaiting it inside.
+	Arrive func(message []byte, via any) []byte
 
 	// Limit is the frame cap this end accepts: the number the host gave, else
 	// CAP. Zero or less takes CAP. A listener declares whatever it resolves in
@@ -105,14 +93,6 @@ func (d Door) promise() error {
 	return nil
 }
 
-// Expect names the ask this end wants an answer to: the far warden and the
-// number the ask spent. Both are the caller's own knowledge of the message it
-// built, and neither ever travels outside a seal.
-type Expect struct {
-	Warden [32]byte
-	Seq    int64
-}
-
 // Line is one live connection, from either end: the two halves differ only in
 // who dialled. Frames flow both ways on it, so both ends can originate asks
 // down one connection.
@@ -128,18 +108,30 @@ type Line struct {
 	// whatever its own appetite.
 	near int64
 
-	mu sync.Mutex
-	// What this end is waiting to hear, keyed by the far warden and the number
-	// of the ask.
-	pending map[Expect]chan []byte
+	mu      sync.Mutex
+	writing sync.Mutex
 	alive   bool
 	once    sync.Once
+	closed  []func()
 }
 
 func hold(conn net.Conn, door Door, far, near int64) *Line {
-	l := &Line{conn: conn, door: door, far: far, near: near, pending: map[Expect]chan []byte{}, alive: true}
+	l := &Line{conn: conn, door: door, far: far, near: near, alive: true}
 	go l.read()
 	return l
+}
+
+// OnClose registers what to do when this line stops carrying, so whoever keeps
+// a table of lines can let go of a dead one.
+func (l *Line) OnClose(fn func()) {
+	l.mu.Lock()
+	if !l.alive {
+		l.mu.Unlock()
+		fn()
+		return
+	}
+	l.closed = append(l.closed, fn)
+	l.mu.Unlock()
 }
 
 // Open says whether the line is still carrying. The line is dumb: no reconnect,
@@ -151,76 +143,55 @@ func (l *Line) Open() bool {
 	return l.alive
 }
 
-// Close shuts the line down. Its pending asks resolve to nothing — the same
-// nothing a shut door gives.
+// Close shuts the line down. Whoever was waiting on an answer that would have
+// come down it waits out its own deadline, which is the same nothing a shut
+// door gives.
 func (l *Line) Close() { l.shut() }
 
 func (l *Line) shut() {
 	l.once.Do(func() {
 		l.mu.Lock()
 		l.alive = false
-		waiting := l.pending
-		l.pending = map[Expect]chan []byte{}
+		told := l.closed
+		l.closed = nil
 		l.mu.Unlock()
-		for _, ch := range waiting {
-			ch <- nil
-		}
 		_ = l.conn.Close()
+		for _, fn := range told {
+			fn()
+		}
 	})
 }
 
-// Carry sends one envelope down the line. Handed an expect, the channel it
-// returns receives the answer's sealed bytes, or nil if the line closes first;
-// handed none, this is a say and the channel receives nil at once. There is
-// always a channel and it always delivers exactly one value, so a caller's own
-// deadline is a select of its own.
-func (l *Line) Carry(message []byte, expect *Expect) <-chan []byte {
-	ch := make(chan []byte, 1)
-
+// Carry sends one envelope down the line and says whether it went. Nothing
+// comes back here: an answer arrives as a frame of its own and goes in the
+// warden's one entry point like everything else, which is what pairs it with
+// the ask awaiting it.
+func (l *Line) Carry(message []byte) bool {
 	l.mu.Lock()
-	if !l.alive {
-		l.mu.Unlock()
-		ch <- nil
-		return ch
+	alive := l.alive
+	l.mu.Unlock()
+	if !alive {
+		return false
 	}
 	// Over what the far road promised is refused here, before a byte flows:
 	// sending it would have the far end drop the connection without a word, and
 	// killing your own line is worse than not sending.
 	if int64(len(message)) > l.far {
-		l.mu.Unlock()
-		ch <- nil
-		return ch
+		return false
 	}
-	if expect != nil {
-		// One return padlock — this end's own — one far warden and one number
-		// would make two answers indistinguishable, so the second ask is not sent
-		// while the first waits. Refusing here is the sender's own kit saying no;
-		// the ask never reaches the road.
-		if _, waiting := l.pending[*expect]; waiting {
-			l.mu.Unlock()
-			ch <- nil
-			return ch
-		}
-		l.pending[*expect] = ch
-	}
-	l.mu.Unlock()
-
 	if err := l.write(message); err != nil {
-		// A line that has stopped carrying is a dead line, and its pending asks
-		// resolve to the same nothing a shut door gives.
 		l.shut()
-		if expect == nil {
-			ch <- nil
-		}
-		return ch
+		return false
 	}
-	if expect == nil {
-		ch <- nil
-	}
-	return ch
+	return true
 }
 
+// write is the one place bytes leave, and it is serialised: both ends may
+// originate on one connection and an answer is written by whichever goroutine
+// judged it, so two half-written frames would be one unreadable line.
 func (l *Line) write(message []byte) error {
+	l.writing.Lock()
+	defer l.writing.Unlock()
 	frame := make([]byte, length+len(message))
 	binary.BigEndian.PutUint64(frame[:length], uint64(len(message)))
 	copy(frame[length:], message)
@@ -250,45 +221,32 @@ func (l *Line) read() {
 	}
 }
 
-// arrive resolves one frame by unsealing and by nothing else, and the record
-// byte inside the seal says which of the two it is: Hear refuses anything that
-// is not an answer by that byte, so nothing is tried as one record and then as
-// the other. An answer to an ask this end is waiting on — opened under the
-// padlock that ask named — pairs by the warden and the seq inside the seal.
-// Otherwise the envelope is a say, handed to judgment; its answer, when there
-// is one, goes back as a frame. Otherwise it is ordinary silence: the frame
-// dropped, the line kept.
+// arrive hands one frame to the door and writes back whatever bytes come. The
+// line reads nothing: which of the two records arrived is inside the seal, and
+// the only thing holding the secret that opens it is the warden.
+//
+// It runs on its own goroutine, because judging a frame may itself wait for an
+// answer that arrives on this same line — a being in the middle of a chain — and
+// a pump that waited on a judgment would be a pump that deadlocks on its own
+// connection.
 func (l *Line) arrive(message []byte) {
-	if l.door.Hear != nil {
-		if answer, err := l.door.Hear(message); err == nil {
-			want := Expect{Warden: answer.Warden, Seq: answer.Seq}
-			l.mu.Lock()
-			ch, waiting := l.pending[want]
-			if waiting {
-				delete(l.pending, want)
-			}
-			l.mu.Unlock()
-			if waiting {
-				ch <- message
-				return
-			}
+	if l.door.Arrive == nil {
+		return
+	}
+	go func() {
+		back := l.door.Arrive(message, l)
+		if len(back) == 0 {
+			return
 		}
-	}
-	if l.door.Judge == nil {
-		return
-	}
-	back := l.door.Judge(message)
-	if len(back) == 0 {
-		return
-	}
-	// An answer over what the far road promised is not sent at all: silence
-	// keeps the line, and a frame the far end must drop does not.
-	if int64(len(back)) > l.far {
-		return
-	}
-	if err := l.write(back); err != nil {
-		l.shut()
-	}
+		// An answer over what the far road promised is not sent at all: silence
+		// keeps the line, and a frame the far end must drop does not.
+		if int64(len(back)) > l.far {
+			return
+		}
+		if err := l.write(back); err != nil {
+			l.shut()
+		}
+	}()
 }
 
 // ErrNotALine is what a hint that is no line gets. The scheme is
@@ -445,104 +403,7 @@ func (s *Listener) Close() error {
 	return s.listener.Close()
 }
 
-// Caller is the caller a ground with sockets under it holds. It walks the roads
-// a peer offered, takes the line wherever one is offered, and falls through to
-// the common carriage everywhere else — and nothing at a call site says which,
-// because choosing among a peer's hints is the caller's whole job.
-//
-// Which roads a caller can speak is never configured and never passed. In Go it
-// is answered at build time: a program that imports this package has sockets
-// under it, and one that does not holds carriage.Caller and speaks the common
-// carriage alone. There is no browser under a Go binary, so unlike the JS kit
-// there is nothing here to find out at runtime.
-//
-// The lines it dials are kept, one per road, because a line is persistent by
-// definition: a fresh connection per ask would be the common carriage wearing a
-// socket, and it would leave a ground that publishes nothing unreachable
-// between calls. They belong to the ground that took them up, so HangUp is how
-// they are put down.
-type Caller struct {
-	// Door is what an arriving frame is handed to on a line this caller
-	// dialled. A caller without one cannot hold a line, so it walks past every
-	// tcp:// hint and posts.
-	Door Door
-
-	// Carriage is the common carriage this caller falls through to. Its zero
-	// value works.
-	Carriage carriage.Caller
-
-	mu    sync.Mutex
-	lines map[string]*Line
-}
-
-// Send carries the message down the first road this caller can speak that
-// actually carried it, and hands back the sealed answer. expect names the ask
-// this caller wants an answer to, for the roads that need naming; the common
-// carriage needs none, because its answer rides its own response.
-//
-// A road this caller cannot speak is not a road that failed: nothing was sent,
-// so no door spoke and no road broke. It is walked past exactly as a hint that
-// was never offered would be, and it is never the fault reported at the end.
-func (c *Caller) Send(hints []string, message []byte, expect *Expect) ([]byte, error) {
-	var last error
-	for _, hint := range hints {
-		if strings.HasPrefix(hint, "tcp://") {
-			if c.Door.Judge == nil {
-				continue
-			}
-			reply, err := c.overLine(hint, message, expect)
-			if err != nil {
-				last = err
-				continue
-			}
-			return reply, nil
-		}
-		reply, err := c.Carriage.Send([]string{hint}, message)
-		if err != nil {
-			last = err
-			continue
-		}
-		return reply, nil
-	}
-	if last != nil {
-		return nil, last
-	}
-	// Every hint was a road this caller cannot speak, so no road was tried at
-	// all. That is not weather: there is no fault to report the road of.
-	return nil, nil
-}
-
-func (c *Caller) overLine(hint string, message []byte, expect *Expect) ([]byte, error) {
-	c.mu.Lock()
-	if c.lines == nil {
-		c.lines = map[string]*Line{}
-	}
-	held, ok := c.lines[hint]
-	c.mu.Unlock()
-	if !ok || !held.Open() {
-		dialled, err := Dial(c.Door, hint)
-		if err != nil {
-			return nil, err
-		}
-		c.mu.Lock()
-		c.lines[hint] = dialled
-		c.mu.Unlock()
-		held = dialled
-	}
-	return <-held.Carry(message, expect), nil
-}
-
-// HangUp lets go of every line this caller dialled. A line is a held resource
-// and the ground that took it up is the one that puts it down.
-func (c *Caller) HangUp() {
-	c.mu.Lock()
-	held := make([]*Line, 0, len(c.lines))
-	for _, l := range c.lines {
-		held = append(held, l)
-	}
-	c.lines = nil
-	c.mu.Unlock()
-	for _, l := range held {
-		l.Close()
-	}
-}
+// Speaks says whether a hint names a road this package can carry. Choosing
+// among a peer's hints is delivery's job, and this is the one fact about a hint
+// that a line has to offer it.
+func Speaks(hint string) bool { return strings.HasPrefix(hint, "tcp://") }

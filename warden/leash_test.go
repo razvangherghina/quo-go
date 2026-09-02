@@ -1,8 +1,7 @@
 package warden_test
 
 import (
-	"encoding/binary"
-	"errors"
+	"context"
 	"testing"
 
 	"quo.systems/kit/arithmetic"
@@ -25,6 +24,7 @@ const relayText = "Relay\n  pass() int\n"
 // behind its back — and the one thing it cannot hold in advance is the
 // allowance, because that belongs to the message.
 type relay struct {
+	warden.Attach
 	w      *warden.Warden
 	far    [32]byte
 	target [32]byte
@@ -37,16 +37,13 @@ type relay struct {
 	greedy  bool // names a generous allowance of its own beside the leash
 }
 
-func (r *relay) Invoke(call warden.Call) ([]byte, error) {
-	if call.Method != "pass" {
-		return nil, errors.New("the blueprint declares no such field")
-	}
+func (r *relay) Pass(ctx context.Context) (int64, error) {
 	// The work this being does on the caller's behalf. The budget falls by it,
 	// because the dwell is the difference between when the message arrived and
 	// when it is handed onward.
 	r.clock.step(r.dwell)
 
-	leash := call.Leash
+	leash := warden.Of(ctx).Leash
 	reach := warden.Reach{
 		Far:      r.far,
 		Being:    &r.target,
@@ -57,17 +54,15 @@ func (r *relay) Invoke(call warden.Call) ([]byte, error) {
 	if r.greedy {
 		reach.Allowance = envelope.Allowance{Time: 1 << 30, Hops: 99}
 	}
-	message, seq, err := r.w.Ask(secret("relay/ephemeral"), reach)
+	message, seq, err := r.w.Ask(reach)
 	r.next = nil
 	r.message, r.err = message, err
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 	// Delivery is not Quo's, so nothing here carries the bytes. What this
 	// being answers is the number it spent.
-	out := make([]byte, 8)
-	binary.BigEndian.PutUint64(out, uint64(seq))
-	return out, nil
+	return seq, nil
 }
 
 // door stands a ground up on a clock the bench holds.
@@ -80,6 +75,7 @@ func door(t *testing.T, label string, clock func() int64) *warden.Warden {
 		PadlockSecret:  secret(label + "/padlock"),
 		Limit:          1 << 20,
 		Clock:          clock,
+		Random:         fixed(label),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -103,18 +99,24 @@ func link(t *testing.T, dwell int64) *chain {
 	middle := door(t, "middle", clockM.read)
 	far := door(t, "far", clockF.read)
 
-	target, err := far.Hold(todoText, &todo{}, warden.Keys{Secret: secret("far/being"), HeirSecret: secret("far/beingHeir")})
+	target, _, err := far.Hold(&todo{}, warden.Holding{
+		Blueprint: todoText,
+		Keys:      warden.Keys{Secret: secret("far/being"), HeirSecret: secret("far/beingHeir")},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	invFar, err := far.Grant(target, warden.Keys{Secret: secret("far/voice"), HeirSecret: secret("far/voiceHeir")}, far.Padlock(), []string{"https://far.example"})
+	invFar, err := far.GrantAs(target, warden.Keys{Secret: secret("far/voice"), HeirSecret: secret("far/voiceHeir")}, far.Padlock(), []string{"https://far.example"})
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	next := secret("relay/nextHeir")
 	r := &relay{w: middle, far: far.Name(), target: target, next: &next, dwell: dwell, clock: clockM}
-	being, err := middle.Hold(relayText, r, warden.Keys{Secret: secret("middle/being"), HeirSecret: secret("middle/beingHeir")})
+	being, _, err := middle.Hold(r, warden.Holding{
+		Blueprint: relayText,
+		Keys:      warden.Keys{Secret: secret("middle/being"), HeirSecret: secret("middle/beingHeir")},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +128,7 @@ func link(t *testing.T, dwell int64) *chain {
 	if err != nil {
 		t.Fatal(err)
 	}
-	inv, err := middle.Grant(being, warden.Keys{Secret: secret("middle/voice"), HeirSecret: secret("middle/voiceHeir")}, middle.Padlock(), nil)
+	inv, err := middle.GrantAs(being, warden.Keys{Secret: secret("middle/voice"), HeirSecret: secret("middle/voiceHeir")}, middle.Padlock(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -65,7 +65,12 @@ type outbound struct {
 	// and has not yet heard an answer to. Article XII's fourth check on an
 	// answer is that one is awaiting under that padlock, that warden and that
 	// seq, so the caller keeps the record that check reads.
-	awaiting map[await]bool
+	//
+	// Each holds the channel the ask's own caller is waiting on, so an answer
+	// that arrives through the warden's one door settles the call that made
+	// it — whichever road carried it, and whether or not a socket was
+	// involved.
+	awaiting map[await]chan *heard
 }
 
 // await is one ask still out: the number it spent and the padlock it told the
@@ -80,13 +85,33 @@ type await struct {
 
 // record is the pair of records a warden keeps. They are not the same shape.
 type record struct {
-	in     map[[32]byte]*inbound
-	out    map[[32]byte]*outbound // keyed by the far warden's pk
+	in map[[32]byte]*inbound
+	// out is a list rather than a map, because two of this ground's beings may
+	// hold relations at one far warden and a relation is not identified by the
+	// house it stands at. Which of them may spend which is what the holder
+	// says.
+	out    []*outbound
 	window int64
 }
 
 func newRecord(window int64) *record {
-	return &record{in: map[[32]byte]*inbound{}, out: map[[32]byte]*outbound{}, window: window}
+	return &record{in: map[[32]byte]*inbound{}, window: window}
+}
+
+// at finds a relation with one house, narrowed by the being that spends it
+// when the caller knows which. With two rows at one house and no holder named,
+// the first is taken: a caller that meant the other one says so.
+func (r *record) at(far [32]byte, holder *[32]byte) *outbound {
+	for _, rel := range r.out {
+		if rel.warden != far {
+			continue
+		}
+		if holder != nil && rel.holder != *holder {
+			continue
+		}
+		return rel
+	}
+	return nil
 }
 
 // heir finds the standing whose committed heir this voice is. The commitment
@@ -96,13 +121,22 @@ func newRecord(window int64) *record {
 // Each row is hashed against the name its own commitment was minted under,
 // never the name the door wears now: after a name succession an older standing
 // must still be able to rotate.
-func (r *record) heir(voice [32]byte) *inbound {
-	for _, row := range r.in {
-		if arithmetic.Commit(row.name, voice) == row.commitment {
-			return row
+// Matching more than one standing is ambiguous, and the caller answers silence:
+// no order over the records is law, so a door that chose between them would
+// choose differently from the next — and ranging a Go map is randomised, so
+// this door would not even choose the same one twice. A granter that committed
+// one heir at two standings has made its own error.
+func (r *record) heir(voice [32]byte) (row *inbound, ambiguous bool) {
+	for _, one := range r.in {
+		if arithmetic.Commit(one.name, voice) != one.commitment {
+			continue
 		}
+		if row != nil {
+			return nil, true
+		}
+		row = one
 	}
-	return nil
+	return row, false
 }
 
 // rotate hands a standing over: the pk becomes the current holder, the carried

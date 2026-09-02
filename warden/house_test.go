@@ -31,7 +31,7 @@ func (g *ground) armed() [32]byte {
 
 // claim is the message that proves an armed commitment: the claimant's own
 // voice, signing, carrying the fresh commitment every rotation carries.
-func (g *ground) claim(voiceSecret [32]byte, seq int64) ([]byte, error) {
+func (g *ground) claim(voiceSecret [32]byte, seq int64) []byte {
 	g.t.Helper()
 	next := arithmetic.Commit(g.w.Name(), arithmetic.SigningKey(secret("claimantHeir")))
 	s := g.say(arithmetic.SigningKey(voiceSecret), seq)
@@ -51,7 +51,7 @@ func TestAnArmedCommitmentIsClaimedOnce(t *testing.T) {
 	if before := g.w.Standings(g.being); len(before) != 1 {
 		t.Fatalf("an arm wrote %d standings where it should write none", len(before)-1)
 	}
-	if g.w.Armed() != 1 {
+	if warden.ArmsHeld(g.w) != 1 {
 		t.Fatal("the arm is not held")
 	}
 
@@ -59,7 +59,7 @@ func TestAnArmedCommitmentIsClaimedOnce(t *testing.T) {
 	if len(estate.Classes) != 2 {
 		t.Fatalf("the claim was answered a house of %d classes", len(estate.Classes))
 	}
-	if g.w.Armed() != 0 {
+	if warden.ArmsHeld(g.w) != 0 {
 		t.Fatal("the arm was not spent")
 	}
 	if after := g.w.Standings(g.being); len(after) != 2 || !slicesHas(after, claimVoice()) {
@@ -74,7 +74,7 @@ func TestAnArmedCommitmentIsClaimedOnce(t *testing.T) {
 	if after := g.w.Standings(g.being); len(after) != held {
 		t.Fatal("a second claim on a spent arm took a standing")
 	}
-	if g.w.Armed() != 0 {
+	if warden.ArmsHeld(g.w) != 0 {
 		t.Fatal("a second claim put the arm back")
 	}
 }
@@ -87,7 +87,7 @@ func TestAWrongProofLeavesTheArmWhereItWas(t *testing.T) {
 	g.armed()
 	held := len(g.w.Standings(g.being))
 	g.answer(g.claim(secret("impostor"), 1))
-	if g.w.Armed() != 1 {
+	if warden.ArmsHeld(g.w) != 1 {
 		t.Fatal("a wrong proof spent the arm")
 	}
 	if after := g.w.Standings(g.being); len(after) != held {
@@ -109,7 +109,7 @@ func TestAnArmNeverTakesAStandingAway(t *testing.T) {
 	if estate := mustEstate(t, g.answer(g.judge(g.inv.HeirSecret, g.say(g.inv.Heir, 2)))); len(estate.Classes) != 2 {
 		t.Fatal("the holder lost its standing to an arm")
 	}
-	if g.w.Armed() != 1 {
+	if warden.ArmsHeld(g.w) != 1 {
 		t.Fatal("an ask spent an arm")
 	}
 }
@@ -128,10 +128,10 @@ func TestForgetDropsOneRelation(t *testing.T) {
 	if dropped := g.w.Forget(g.being, &one); dropped != 1 {
 		t.Fatalf("forgetting one house dropped %d rows", dropped)
 	}
-	if _, _, _, _, ok := g.w.Relation(one); ok {
+	if _, _, _, _, ok := g.w.RelationAt(one); ok {
 		t.Fatal("the forgotten relation is still held")
 	}
-	if _, _, _, _, ok := g.w.Relation(two); !ok {
+	if _, _, _, _, ok := g.w.RelationAt(two); !ok {
 		t.Fatal("forgetting one house took another with it")
 	}
 	// A being nobody stands for drops nothing, and the whole drop is the rest.
@@ -164,9 +164,10 @@ func TestStandingsAreVoicesAlone(t *testing.T) {
 
 // panicky is a being that falls over rather than answering, which is the fault
 // an answering layer most wants back.
-type panicky struct{}
+type panicky struct{ warden.Attach }
 
-func (panicky) Invoke(warden.Call) ([]byte, error) { panic("the being fell over") }
+func (panicky) Add(string) string { panic("the being fell over") }
+func (panicky) Count() int64      { panic("the being fell over") }
 
 // TestSilenceIsObservedInward holds the two directions apart: outward every
 // refusal is the same nothing, inward the house is told which step it was and
@@ -205,7 +206,10 @@ func TestSilenceIsObservedInward(t *testing.T) {
 // hears why.
 func TestABeingThatFallsOverIsSilence(t *testing.T) {
 	g := stand(t)
-	fell, err := g.w.Hold(todoText, panicky{}, warden.Keys{Secret: secret("fell"), HeirSecret: secret("fellHeir")})
+	fell, _, err := g.w.Hold(&panicky{}, warden.Holding{
+		Blueprint: todoText,
+		Keys:      warden.Keys{Secret: secret("fell"), HeirSecret: secret("fellHeir")},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -325,7 +329,10 @@ func TestNewsIsNotACaller(t *testing.T) {
 func TestTheDoorRoutesByTheBlueprint(t *testing.T) {
 	g := stand(t)
 	reached := &loud{}
-	being, err := g.w.Hold(todoText, reached, warden.Keys{Secret: secret("loud"), HeirSecret: secret("loudHeir")})
+	being, _, err := g.w.Hold(reached, warden.Holding{
+		Blueprint: todoText,
+		Keys:      warden.Keys{Secret: secret("loud"), HeirSecret: secret("loudHeir")},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -344,11 +351,19 @@ func TestTheDoorRoutesByTheBlueprint(t *testing.T) {
 
 // loud answers anything and says it was asked, so a case can tell a refusal at
 // the door from a refusal by the object.
-type loud struct{ touched bool }
+type loud struct {
+	warden.Attach
+	touched bool
+}
 
-func (o *loud) Invoke(warden.Call) ([]byte, error) {
+func (o *loud) Add(string) (string, error) {
 	o.touched = true
-	return nil, errors.New("the being answered")
+	return "", errors.New("the being answered")
+}
+
+func (o *loud) Count() (int64, error) {
+	o.touched = true
+	return 0, errors.New("the being answered")
 }
 
 // TestARefusalThisKitMadeItselfSpendsNoNumber holds the count against the far
@@ -361,7 +376,7 @@ func TestARefusalThisKitMadeItselfSpendsNoNumber(t *testing.T) {
 
 	// A hint the wire will not carry: the refusal is this kit's own, made
 	// before a byte is sealed.
-	if _, _, err := g.w.Ask(secret("ephemeral"), warden.Reach{
+	if _, _, err := g.w.Ask(warden.Reach{
 		Far:       far,
 		Allowance: envelope.Allowance{Time: 5000, Hops: 8},
 		Hints:     []string{"\xff"},
@@ -369,7 +384,7 @@ func TestARefusalThisKitMadeItselfSpendsNoNumber(t *testing.T) {
 		t.Fatal("the kit sealed a message it should have refused")
 	}
 	// A leash with nothing left is the same: refused here, sent nowhere.
-	if _, _, err := g.w.Ask(secret("ephemeral"), warden.Reach{
+	if _, _, err := g.w.Ask(warden.Reach{
 		Far:       far,
 		Allowance: envelope.Allowance{Time: 0, Hops: 0},
 	}); err == nil {
@@ -377,7 +392,7 @@ func TestARefusalThisKitMadeItselfSpendsNoNumber(t *testing.T) {
 	}
 
 	// The first message that is actually sent is number one.
-	_, seq, err := g.w.Ask(secret("ephemeral"), warden.Reach{
+	_, seq, err := g.w.Ask(warden.Reach{
 		Far:       far,
 		Allowance: envelope.Allowance{Time: 5000, Hops: 8},
 	})
@@ -388,7 +403,7 @@ func TestARefusalThisKitMadeItselfSpendsNoNumber(t *testing.T) {
 		t.Fatalf("a refusal this kit made itself burned a number: the first sent is %d", seq)
 	}
 	// And a message that is sent does spend one.
-	if _, next, err := g.w.Ask(secret("ephemeral"), warden.Reach{
+	if _, next, err := g.w.Ask(warden.Reach{
 		Far:       far,
 		Allowance: envelope.Allowance{Time: 5000, Hops: 8},
 	}); err != nil || next != 2 {

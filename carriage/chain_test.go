@@ -1,6 +1,7 @@
 package carriage_test
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"testing"
@@ -25,6 +26,7 @@ const agencyText = "Agency\n  total() int\n"
 // the one thing it takes from each call is the leash, because the allowance
 // belongs to the message rather than to the being.
 type agency struct {
+	warden.Attach
 	w       *warden.Warden
 	far     [32]byte
 	target  [32]byte
@@ -37,18 +39,15 @@ type agency struct {
 	dwell   int64 // milliseconds of work, on the door's own clock
 }
 
-func (a *agency) Invoke(call warden.Call) ([]byte, error) {
-	if call.Method != "total" {
-		return nil, errors.New("the blueprint declares no such field")
-	}
-	a.arrived = call.Leash.Received()
+func (a *agency) Total(ctx context.Context) (int64, error) {
+	leash := warden.Of(ctx).Leash
+	a.arrived = leash.Received()
 	// The work this door does on the client's behalf. The dwell is the
 	// difference between when the message arrived and when it is handed
 	// onward, so it is spent here, between the two readings.
 	a.clock.step(a.dwell)
 
-	leash := call.Leash
-	message, seq, err := a.w.Ask(secret("agency/ephemeral"), warden.Reach{
+	message, seq, err := a.w.Ask(warden.Reach{
 		Far:      a.far,
 		Being:    &a.target,
 		Method:   &envelope.Method{Name: "count", Args: []byte{}},
@@ -56,33 +55,41 @@ func (a *agency) Invoke(call warden.Call) ([]byte, error) {
 		NextHeir: a.next,
 	})
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 	a.next = nil
 	// What actually crossed, read off the payload this being just sealed.
 	sent, err := envelope.OpenSay(secret("subcontractor/padlock"), message)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
 	a.onward = sent.Allowance
 
+	// The ask is held before the bytes go out, because the answer may be back
+	// before the sending returns.
+	pending := a.w.Expect(a.far, seq, [32]byte{})
 	reply, err := carriage.Caller{}.Send(a.hints, message)
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
-	if reply == nil {
+	if reply != nil {
+		a.w.Arrive(reply, nil)
+	} else {
+		a.w.Forgo(a.far, seq, [32]byte{})
+	}
+	answer, heard := pending.Wait(ctx, 5000)
+	if !heard {
 		// Silence from the far door is silence from this one: a warden never
 		// narrates what happened behind it.
-		return nil, errors.New("the far door said nothing")
-	}
-	answer, err := a.w.Hear(a.opens, reply)
-	if err != nil {
-		return nil, err
+		return 0, errors.New("the far door said nothing")
 	}
 	if answer.Seq != seq {
-		return nil, errors.New("the answer names another ask")
+		return 0, errors.New("the answer names another ask")
 	}
-	return answer.Data, nil
+	if len(answer.Data) != 8 {
+		return 0, errors.New("the far being answered no number")
+	}
+	return int64(binary.BigEndian.Uint64(answer.Data)), nil
 }
 
 // TestADoorStandsInTheMiddleOfAChain drives client → agency → subcontractor
@@ -93,13 +100,15 @@ func TestADoorStandsInTheMiddleOfAChain(t *testing.T) {
 
 	// The far door, holding the being that does the work.
 	sub := stand(t, "subcontractor")
-	target, err := sub.Hold(todoText, &todo{items: []string{"one", "two"}},
-		warden.Keys{Secret: secret("sub/being"), HeirSecret: secret("sub/beingHeir")})
+	target, _, err := sub.Hold(&todo{items: []string{"one", "two"}}, warden.Holding{
+		Blueprint: todoText,
+		Keys:      warden.Keys{Secret: secret("sub/being"), HeirSecret: secret("sub/beingHeir")},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	subDoor := serve(t, sub, "subcontractor")
-	toAgency, err := sub.Grant(target,
+	toAgency, err := sub.GrantAs(target,
 		warden.Keys{Secret: secret("sub/voice"), HeirSecret: secret("sub/voiceHeir")},
 		sub.Padlock(), []string{subDoor.URL})
 	if err != nil {
@@ -115,14 +124,17 @@ func TestADoorStandsInTheMiddleOfAChain(t *testing.T) {
 	}
 	next := secret("agency/nextHeir")
 	a.next = &next
-	being, err := mid.Hold(agencyText, a, warden.Keys{Secret: secret("agency/being"), HeirSecret: secret("agency/beingHeir")})
+	being, _, err := mid.Hold(a, warden.Holding{
+		Blueprint: agencyText,
+		Keys:      warden.Keys{Secret: secret("agency/being"), HeirSecret: secret("agency/beingHeir")},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	mid.Stand(being, toAgency, toAgency.HeirSecret)
 	midDoor := serve(t, mid, "agency")
 
-	toClient, err := mid.Grant(being,
+	toClient, err := mid.GrantAs(being,
 		warden.Keys{Secret: secret("agency/voice"), HeirSecret: secret("agency/voiceHeir")},
 		mid.Padlock(), []string{midDoor.URL})
 	if err != nil {
@@ -134,7 +146,7 @@ func TestADoorStandsInTheMiddleOfAChain(t *testing.T) {
 	client := stand(t, "client")
 	client.Stand(client.Self(), toClient, toClient.HeirSecret)
 	mine := secret("client/heir")
-	message, seq, err := client.Ask(secret("client/ephemeral"), warden.Reach{
+	message, seq, err := client.Ask(warden.Reach{
 		Far:       toClient.Warden,
 		Being:     &being,
 		Method:    &envelope.Method{Name: "total", Args: []byte{}},
@@ -152,7 +164,7 @@ func TestADoorStandsInTheMiddleOfAChain(t *testing.T) {
 	if reply == nil {
 		t.Fatal("the agency answered silence")
 	}
-	answer, err := client.Hear(client.PadlockSecret(), reply)
+	answer, err := client.Hear(reply)
 	if err != nil {
 		t.Fatal(err)
 	}

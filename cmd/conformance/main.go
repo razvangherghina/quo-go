@@ -5,10 +5,21 @@
 // A subject decides nothing. It stands a warden from handed keys, hands the
 // door bytes, and reports the records as Article IX's cargo. Every expectation
 // lives in the scenario file.
+//
+// It stands below the seam an application stands on, and says so here. The
+// scenario hands it whole envelopes and whole asks — bytes deliberately
+// malformed, an ask naming neither being nor method, an ask at a being whose
+// blueprint this ground does not hold, and the number a compose spent, read
+// back. Every one of those is a thing a handle cannot produce, because a handle
+// encodes through the blueprint. So this command drives the warden's own entry
+// point directly, as a wire suite hand-writes bytes, and it stands no road at
+// all: the harness is the carriage. The seam never grows a raw-ask surface to
+// accommodate it.
 package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -60,12 +71,35 @@ var (
 	roads []string
 )
 
+// supply is the randomness the warden was handed at open, spent in the fixed
+// order a judgment takes it: the answer's ephemeral key first, then the two
+// keys a receive mints. It is set per order, because every draw this kit takes
+// is the scenario's to name.
+var supply []([32]byte)
+
+func supplied() [32]byte {
+	if len(supply) == 0 {
+		fmt.Fprintln(os.Stderr, "subject: the draws for this order have run out")
+		os.Exit(1)
+	}
+	one := supply[0]
+	supply = supply[1:]
+	return one
+}
+
 // A being that answers nothing. Every exchange in the first scenario is refused
 // before step 7, so nothing here is ever invoked — and a subject that supplied
 // a clever being would be supplying behaviour the scenario did not ask for.
-type quiet struct{}
+//
+// It answers every field the contract's two blueprints declare, and answers
+// each with a refusal, which reaches the wire as the same silence as
+// everything else.
+type quiet struct{ warden.Attach }
 
-func (quiet) Invoke(warden.Call) ([]byte, error) { return nil, errors.New("nothing to say") }
+func (quiet) Bump(int64) (int64, error)  { return 0, errors.New("nothing to say") }
+func (quiet) Count() (int64, error)      { return 0, errors.New("nothing to say") }
+func (quiet) Note(string) (int64, error) { return 0, errors.New("nothing to say") }
+func (quiet) Total() (int64, error)      { return 0, errors.New("nothing to say") }
 
 // The one thing a being in this contract does. A warden never makes an onward
 // ask of its own — it hands the leash to the being it routed to — so a being
@@ -73,6 +107,7 @@ func (quiet) Invoke(warden.Call) ([]byte, error) { return nil, errors.New("nothi
 // all. It decides nothing: the scenario named the far warden, the being, the
 // method and the ephemeral key, and what this returns is never asserted.
 type caller struct {
+	warden.Attach
 	when      string
 	far       [32]byte
 	being     *[32]byte
@@ -81,15 +116,24 @@ type caller struct {
 	seq       int64
 }
 
-func (c caller) Invoke(call warden.Call) ([]byte, error) {
-	if call.Method != c.when {
-		return nil, errors.New("nothing to say")
+func (c *caller) Bump(ctx context.Context, _ int64) int64  { return c.reach(ctx, "bump") }
+func (c *caller) Count(ctx context.Context) int64          { return c.reach(ctx, "count") }
+func (c *caller) Note(ctx context.Context, _ string) int64 { return c.reach(ctx, "note") }
+func (c *caller) Total(ctx context.Context) int64          { return c.reach(ctx, "total") }
+
+// reach is the onward ask this being makes while answering. It decides
+// nothing: the scenario named the far warden, the being, the method and the
+// ephemeral key, and what this answers is never asserted.
+func (c *caller) reach(ctx context.Context, field string) int64 {
+	if field != c.when {
+		return 0
 	}
 	// The leash the kit handed in, spent as it was handed. Recomputing it here
 	// would be the subject doing the arithmetic the case is about.
-	leash := call.Leash
+	leash := warden.Of(ctx).Leash
 	seq := c.seq
-	message, _, err := house.Ask(c.ephemeral, warden.Reach{
+	supply = append([]([32]byte){c.ephemeral}, supply...)
+	message, _, err := house.Ask(warden.Reach{
 		Far:    c.far,
 		Leash:  &leash,
 		Being:  c.being,
@@ -102,8 +146,12 @@ func (c caller) Invoke(call warden.Call) ([]byte, error) {
 	// kit's refusal into the door's silence.
 	if err == nil && message != nil {
 		onward = append(onward, message)
+	} else {
+		// The draw was pushed for an ask that was never composed; it is taken
+		// back so nothing later spends the scenario's key by accident.
+		supply = supply[1:]
 	}
-	return []byte{}, nil
+	return 0
 }
 
 func un(s string) ([32]byte, error) {
@@ -123,9 +171,9 @@ func hx(b [32]byte) string { return hex.EncodeToString(b[:]) }
 
 // A grant may name no padlock: Article VII has the row keep "the padlock it
 // named and the hints it gave" — the voice's — and at grant time the voice has
-// said nothing. This kit's Grant takes a value rather than a pointer, so an
-// absent padlock is the zero array, which reaches only the invitation this
-// scenario never spends.
+// said nothing. This kit's GrantAs takes the padlock as a value, so an absent
+// padlock is the zero array, which reaches only the invitation this scenario
+// never spends.
 func orZero(s string) ([32]byte, error) {
 	if s == "" {
 		return [32]byte{}, nil
@@ -299,6 +347,11 @@ func stand(o order) (any, error) {
 			}
 			return reading
 		},
+		// Every draw of randomness is the scenario's to name, so the warden is
+		// handed a source that serves what the order in hand put in front of
+		// it: the answer's ephemeral key first, then the two keys a receive
+		// mints.
+		Random: supplied,
 	})
 	if err != nil {
 		return nil, err
@@ -318,7 +371,7 @@ func stand(o order) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		var object warden.Being = quiet{}
+		var object any = &quiet{}
 		if one.Onward != nil {
 			far, err := un(one.Onward.At)
 			if err != nil {
@@ -332,7 +385,7 @@ func stand(o order) (any, error) {
 			if err != nil {
 				return nil, err
 			}
-			acts := caller{when: one.Onward.When, far: far, ephemeral: ephemeral, seq: seq}
+			acts := &caller{when: one.Onward.When, far: far, ephemeral: ephemeral, seq: seq}
 			if one.Onward.Being != "" {
 				at, err := un(one.Onward.Being)
 				if err != nil {
@@ -349,7 +402,10 @@ func stand(o order) (any, error) {
 			}
 			object = acts
 		}
-		pk, err := house.Hold(one.Blueprint, object, warden.Keys{Secret: seed, HeirSecret: heirSeed})
+		pk, _, err := house.Hold(object, warden.Holding{
+			Blueprint: one.Blueprint,
+			Keys:      warden.Keys{Secret: seed, HeirSecret: heirSeed},
+		})
 		if err != nil {
 			return nil, err
 		}
@@ -378,7 +434,7 @@ func stand(o order) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		inv, err := house.Grant(being, warden.Keys{Secret: voiceSeed, HeirSecret: heirSeed}, padlock, one.Hints)
+		inv, err := house.GrantAs(being, warden.Keys{Secret: voiceSeed, HeirSecret: heirSeed}, padlock, one.Hints)
 		if err != nil {
 			return nil, err
 		}
@@ -403,8 +459,8 @@ func stand(o order) (any, error) {
 		// A door that cannot make a being of the arriving class refuses the
 		// cargo, so the class is welcomed before the receive can land. The
 		// keys stay in the draws, where every draw this kit takes is handed.
-		if _, err := house.Welcome(o.Expecting.Blueprint, func([]byte) (warden.Being, error) {
-			return quiet{}, nil
+		if _, err := house.Welcome(o.Expecting.Blueprint, func([]byte) (any, error) {
+			return &quiet{}, nil
 		}); err != nil {
 			return nil, err
 		}
@@ -436,7 +492,7 @@ func stand(o order) (any, error) {
 			}
 			*field.into = &key
 		}
-		house.Publish(being, word)
+		house.Point(being, word)
 	}
 	// The outbound rows: invitations this ground holds at other houses, each
 	// held by the being that may spend it.
@@ -526,7 +582,8 @@ func send(o order) (any, error) {
 		}
 		reach.Method = &envelope.Method{Name: o.Ask.Method.Name, Args: args}
 	}
-	message, _, err := house.Ask(ephemeral, reach)
+	supply = []([32]byte){ephemeral}
+	message, _, err := house.Ask(reach)
 	if err != nil || message == nil {
 		return map[string]any{"bytes": nil}, nil
 	}
@@ -544,7 +601,7 @@ func read(o order) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	answer, err := house.Hear(house.PadlockSecret(), message)
+	answer, err := house.Hear(message)
 	if err != nil {
 		return map[string]any{"answer": nil}, nil
 	}
@@ -575,17 +632,16 @@ func door(o order) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	// The heir is not drawn from the queue: this kit takes it per judgment and
-	// only a `receive` spends it, so drawing one per message would make how far
-	// the queue ran depend on which route a call took — and no scenario asserts
-	// a draw count precisely because kits differ there. It comes from
+	// The two keys a receive mints are not drawn from the queue: only a
+	// `receive` spends them, so drawing them per message would make how far the
+	// queue ran depend on which route a call took — and no scenario asserts a
+	// draw count precisely because kits differ there. They come from
 	// `expecting` instead, which is where the contract puts the keys a door
-	// mints for a being it is taking in.
+	// mints for a being it is taking in, and they sit behind the ephemeral
+	// because that is the order the judgment draws in.
 	onward = nil
-	answer, _ := house.Judge(
-		warden.Draws{Ephemeral: ephemeral, Being: expectedBeing, Heir: expectedHeir},
-		message,
-	)
+	supply = []([32]byte){ephemeral, expectedBeing, expectedHeir}
+	answer := house.Arrive(message, nil)
 	composed := []string{}
 	for _, one := range onward {
 		composed = append(composed, hex.EncodeToString(one))
@@ -671,7 +727,8 @@ func told(word warden.Word, voice, secret [32]byte, peers []warden.Peer, o order
 		if err != nil {
 			return nil, err
 		}
-		sealed, err := house.News(ephemeral, warden.Tell{
+		supply = []([32]byte){ephemeral}
+		sealed, err := house.News(warden.Tell{
 			Peer:        peer,
 			Voice:       voice,
 			VoiceSecret: secret,
