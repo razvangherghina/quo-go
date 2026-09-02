@@ -2434,14 +2434,6 @@ func (w *Warden) own(k kind, row *inbound, m envelope.Method) ([]byte, error) {
 // there are only two: the heir it was promised, or the name it has held since
 // the invitation.
 func (w *Warden) tell(rel *outbound, voice [32]byte, args []byte) ([]byte, error) {
-	// Which of Article XIV's two roads of belief this news came down. A peer
-	// believes news by a key it already holds and there are only two, so the
-	// road is a fact about the signer and never about the word: the name,
-	// which has not moved, or the heir the peer holds the hash of. The
-	// placement found the voice on one of them; which one decides what this
-	// word is allowed to say.
-	byName := voice == rel.warden
-
 	v, err := wire.Decode(Own, argType(FieldTell), args)
 	if err != nil {
 		return nil, err
@@ -2450,13 +2442,37 @@ func (w *Warden) tell(rel *outbound, voice [32]byte, args []byte) ([]byte, error
 	if err != nil {
 		return nil, err
 	}
+	// tell answers nothing, and a field that answers nothing answers zero bytes.
+	return nil, w.believe(rel, word, &voice)
+}
+
+// believe is Article XIV's belief itself, held apart from the road a word came
+// down. News arrives signed, and names the key that signed it. A `moved` word
+// met in an answer names none: it came back on the row that asked for it,
+// under that row's padlock and against an ask awaiting there, so the answer's
+// own checks have already bound it to the house the row stands at, and there
+// is no second signature to read. Both are the same act on the record.
+//
+// A word met in an answer carries no number either, and none is invented for
+// it: a succession spends the commitment the row holds — believed once, the
+// old one is gone — so this road's replay guard is the commitment, which is
+// what the mark guards for news. Spending a number the far door never named
+// would move a mark that door's own news is counted against.
+func (w *Warden) believe(rel *outbound, word Word, signer *[32]byte) error {
+	// Which of Article XIV's two roads of belief this news came down. A peer
+	// believes news by a key it already holds and there are only two, so the
+	// road is a fact about the signer and never about the word: the name,
+	// which has not moved, or the heir the peer holds the hash of. The
+	// placement found the voice on one of them; which one decides what this
+	// word is allowed to say.
+	byName := signer != nil && *signer == rel.warden
 
 	// The warden's own succession is said by Being absent. A word naming the far
 	// warden's own pk there is refused: its name and its public being are one
 	// key, so that word would be a second spelling of the name's own succession,
 	// and a value with two spellings is two identities.
 	if word.Being != nil && *word.Being == rel.warden {
-		return nil, errors.New("warden: a word naming the far warden's own pk as a being")
+		return errors.New("warden: a word naming the far warden's own pk as a being")
 	}
 
 	switch {
@@ -2465,23 +2481,23 @@ func (w *Warden) tell(rel *outbound, voice [32]byte, args []byte) ([]byte, error
 		// hashes. The commitment is under the name that committed it, which is
 		// the house this relation is with.
 		if word.Commitment == nil {
-			return nil, errors.New("warden: a succession with no next commitment")
+			return errors.New("warden: a succession with no next commitment")
 		}
 		// The successor signs and the peer hashes. A word naming a successor
 		// the signer is not proves nothing about that key: it would let a
 		// committed heir hand this relation to a third party it chose.
-		if *word.Successor != voice {
-			return nil, errors.New("warden: a succession the successor did not sign")
+		if signer != nil && *word.Successor != *signer {
+			return errors.New("warden: a succession the successor did not sign")
 		}
 		held, ok := rel.commitment, false
 		if word.Being != nil {
 			held, ok = rel.beings[*word.Being]
 			if !ok {
-				return nil, errors.New("warden: no commitment held for that being")
+				return errors.New("warden: no commitment held for that being")
 			}
 		}
 		if arithmetic.Commit(rel.warden, *word.Successor) != held {
-			return nil, errors.New("warden: the successor hashes to nothing held here")
+			return errors.New("warden: the successor hashes to nothing held here")
 		}
 		if word.Being != nil {
 			delete(rel.beings, *word.Being)
@@ -2498,15 +2514,19 @@ func (w *Warden) tell(rel *outbound, voice [32]byte, args []byte) ([]byte, error
 		// replace this house's lock at every peer before succeeding anything,
 		// and every message those peers sent next would be sealed to a lock
 		// the heir chose.
+		//
+		// A word met in an answer is signed by nobody, so it can never be that
+		// one signer. Only the pointer a departed being leaves comes back that
+		// road, and a pointer is a succession.
 		if !byName {
-			return nil, errors.New("warden: a padlock replacement the name did not sign")
+			return errors.New("warden: a padlock replacement the name did not sign")
 		}
 		if word.Commitment != nil || word.Being != nil {
-			return nil, errors.New("warden: a padlock replacement carrying more than a lock")
+			return errors.New("warden: a padlock replacement carrying more than a lock")
 		}
 
 	default:
-		return nil, errors.New("warden: a word that says nothing")
+		return errors.New("warden: a word that says nothing")
 	}
 
 	// Believed news rewrites the outbound row entire, one for one off the
@@ -2523,8 +2543,7 @@ func (w *Warden) tell(rel *outbound, voice [32]byte, args []byte) ([]byte, error
 	}
 	// The row is a pointer in a list, so a house that succeeded its name is
 	// found by the name it now wears with nothing to re-key.
-	// tell answers nothing, and a field that answers nothing answers zero bytes.
-	return nil, nil
+	return nil
 }
 
 // receive takes a being in: the destination generates the keys the origin never

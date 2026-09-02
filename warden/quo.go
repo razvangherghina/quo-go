@@ -241,6 +241,7 @@ func (h *remoteHandle) Send(ctx context.Context, sealed *Sealed) (any, bool) {
 	}
 	answer := h.w.carry(ctx, h.row, sealed)
 	if answer == nil {
+		h.rehouse(ctx)
 		return nil, false
 	}
 	if f.Answer == nil {
@@ -263,6 +264,57 @@ func (h *remoteHandle) Call(ctx context.Context, name string, args ...any) (any,
 	}
 	return h.Send(ctx, sealed)
 }
+
+// rehouse is the peer that missed the news finding out for itself. Every ask at
+// a departed being is silence, so silence is the whole of the sign a handle
+// gets; it asks the old door the one question that door still answers, and
+// hands the word back to its own warden by the road news takes. Nothing new is
+// on the wire: `moved` is a field the Warden blueprint has always declared, and
+// the word is the same bytes the news carried.
+//
+// The call that met the move is not retried at the new house. It is answered
+// silence, as the law says every ask at a departed being is, and the caller
+// decides whether to make it again: a call that reached the old door once may
+// have been judged there before the being left, and a handle that quietly sent
+// it on would spend the caller's write a second time without being asked.
+func (h *remoteHandle) rehouse(ctx context.Context) {
+	// One migration publishes two words — the old door's and the new house's,
+	// which points for the name the being wore before — so a handle that
+	// believed one and stopped would still be a house short. It follows the
+	// pointer while it points, and no further than pointers: a door that
+	// pointed forever would hold the caller for its whole leash.
+	for range pointers {
+		v, ok := h.w.introspect(ctx, h.row, FieldMoved, h.being)
+		if !ok {
+			return
+		}
+		word, err := readWord(v)
+		if err != nil {
+			return
+		}
+		h.w.mu.Lock()
+		err = h.w.believe(h.row, word, nil)
+		if err == nil {
+			// The being's identity moved with it, so the handle follows the
+			// row: the next call down this same handle names the being by the
+			// key the new house minted, which is the only name that stands in
+			// a standing there.
+			if word.Successor != nil {
+				h.being = *word.Successor
+			}
+			h.w.persist()
+		}
+		h.w.mu.Unlock()
+		if err != nil {
+			return
+		}
+	}
+}
+
+// pointers is how many houses deep a handle follows a `moved` word in one call.
+// A being that migrated twice while a peer slept left four words behind it, so
+// the bound is not two.
+const pointers = 8
 
 // The four introspections are ordinary asks at the far door's own being, which
 // is what the Warden blueprint declares them as. Nothing here is a second
