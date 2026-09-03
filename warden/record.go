@@ -102,11 +102,21 @@ func newRecord(window int64) *record {
 // when the caller knows which. With two rows at one house and no holder named,
 // the first is taken: a caller that meant the other one says so.
 func (r *record) at(far [32]byte, holder *[32]byte) *outbound {
+	return r.rowAt(far, holder, nil)
+}
+
+// rowAt is at, narrowed further by the voice that holds the row. One being may
+// hold two rows at one house — a stranger's from a knock and an accepted one —
+// so a caller that means a particular relation names the voice.
+func (r *record) rowAt(far [32]byte, holder *[32]byte, voice *[32]byte) *outbound {
 	for _, rel := range r.out {
 		if rel.warden != far {
 			continue
 		}
 		if holder != nil && rel.holder != *holder {
+			continue
+		}
+		if voice != nil && rel.voice != *voice {
 			continue
 		}
 		return rel

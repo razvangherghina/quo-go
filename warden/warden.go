@@ -272,6 +272,9 @@ type Warden struct {
 	// it held, and the destination points for the name the arriving being wore
 	// before, which is a being at no door any more.
 	moved map[[32]byte]Word
+	// public is what this door offers every voice, the stranger included: the
+	// warden's own choice of what its public face holds beside itself.
+	public map[[32]byte]bool
 	// arrived is what the last receive took in — the word it published, the
 	// name it minted, and the voices that came with the standings — which is
 	// everything the migration's second news is sent from.
@@ -359,6 +362,7 @@ func New(f Founding) (*Warden, error) {
 		blueprints:     map[[32]byte]string{},
 		classes:        map[[32]byte]class{},
 		moved:          map[[32]byte]Word{},
+		public:         map[[32]byte]bool{},
 		record:         newRecord(window),
 	}
 	// The public being is the one being every warden already has, of the class
@@ -486,6 +490,9 @@ type Holding struct {
 	Blueprint string
 	Keys      Keys
 	Label     string
+	// Public exposes the being to every voice, the stranger included, as
+	// Expose does after the fact.
+	Public bool
 }
 
 // Hold takes an ordinary object and makes it a being: the warden mints its
@@ -546,8 +553,36 @@ func (w *Warden) hold(object any, h Holding) ([32]byte, Handle, error) {
 		at := pk
 		w.labels[h.Label] = &label{local: &at}
 	}
+	if h.Public {
+		w.public[pk] = true
+	}
 	w.persist()
 	return pk, &localHandle{w: w, being: pk}, nil
+}
+
+// Expose offers a being this door holds to every voice, the stranger included;
+// Conceal takes it back. **Exposure is not a standing**: a stranger still
+// spends no number and holds no row, and a holder's own row is unchanged by it.
+func (w *Warden) Expose(being [32]byte) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if _, held := w.beings[being]; !held {
+		return false
+	}
+	w.public[being] = true
+	w.persist()
+	return true
+}
+
+func (w *Warden) Conceal(being [32]byte) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !w.public[being] {
+		return false
+	}
+	delete(w.public, being)
+	w.persist()
+	return true
 }
 
 // Relation is a handle by its private label: a being minted beside another, or
@@ -652,6 +687,7 @@ func (w *Warden) Release(being [32]byte) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	delete(w.beings, being)
+	delete(w.public, being)
 	for voice, row := range w.record.in {
 		delete(row.beings, being)
 		if len(row.beings) == 0 {
@@ -1034,6 +1070,12 @@ func (w *Warden) Depart(being [32]byte, d Departing) (Departed, error) {
 		Hints:   slices.Clone(d.Hints),
 	}
 	told := w.Peers(being)
+	// The being is gone from here. A door that still held it could pack it
+	// again, and a being packed twice is one being in two houses — which is
+	// why its cargo from here on is nothing, exactly as for one that never
+	// arrived. The standings stay, so a peer still reaches the door and is
+	// pointed.
+	delete(w.beings, being)
 	// The relations went with the cargo, so the old door holds no voice of the
 	// being's any more.
 	w.Forget(being, nil)
@@ -2473,8 +2515,11 @@ func (w *Warden) own(k kind, row *inbound, m envelope.Method) ([]byte, error) {
 		// names is what reached-it-before means there. A door that pointed for
 		// anyone with a row would tell whoever holds anything here that this
 		// being exists and where it went.
-		pointing := published && word.Successor != nil && w.reaches(row, *word.Successor)
-		if !w.reaches(row, being) && !pointing {
+		// `reaches` also asks whether this door still holds the being, which a
+		// door that has pointed does not — the standing is what remains, and
+		// the standing is what "reached it before" means here.
+		pointing := published && word.Successor != nil && w.reached(row, *word.Successor)
+		if !w.reached(row, being) && !pointing {
 			return nil, errors.New("warden: that voice does not reach that being")
 		}
 		if published {
@@ -2785,6 +2830,8 @@ func (w *Warden) estate(row *inbound) Estate {
 	if row != nil {
 		maps.Copy(reach, row.beings)
 	}
+	// What this door offers every voice, the stranger included.
+	maps.Copy(reach, w.public)
 	byDigest := map[[32]byte][]Held{}
 	for pk := range reach {
 		h, ok := w.beings[pk]
@@ -2806,6 +2853,20 @@ func (w *Warden) reaches(row *inbound, being [32]byte) bool {
 	if _, held := w.beings[being]; !held {
 		return false
 	}
+	// What this door exposes, every voice reaches — the stranger included.
+	// **Exposure is not a standing**: it grants no row and spends no number,
+	// which is why it is not read by `reached` below.
+	if w.public[being] {
+		return true
+	}
+	return w.reached(row, being)
+}
+
+// reached is the standing alone: whether this voice was ever given that being,
+// without asking whether this door still holds it. Only `moved` reads it, and
+// only because a door that has pointed no longer holds the being it points
+// about — the standing is the whole of what remains.
+func (w *Warden) reached(row *inbound, being [32]byte) bool {
 	if being == w.self() {
 		return true
 	}

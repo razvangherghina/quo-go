@@ -89,6 +89,11 @@ func bind(bp *notation.Blueprint, object any) (*bound, error) {
 		return b, nil
 	}
 	for _, declared := range bp.Fields {
+		// The only two names the kit needs that the notation can also spell,
+		// so the only two a blueprint could collide with. quo-truth.md, Part two.
+		if declared.Name == "cells" || declared.Name == "take" {
+			return nil, fmt.Errorf("warden: a blueprint may not declare %s: it is the being's own seam", declared.Name)
+		}
 		m := b.object.MethodByName(exported(declared.Name))
 		if !m.IsValid() {
 			return nil, fmt.Errorf("warden: %s declares %s and this object answers no %s", bp.Name, declared.Name, exported(declared.Name))

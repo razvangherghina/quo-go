@@ -96,6 +96,43 @@ func (v Vector) Key(name string) ([32]byte, error) {
 	return k, nil
 }
 
+// Material is the fixed keys area. It carries no vectors: every member of
+// its one object is thirty-two bytes of hex, named.
+type Material struct {
+	Area     string            `json:"area"`
+	Encoding string            `json:"encoding"`
+	Keys     map[string]string `json:"material"`
+}
+
+// Key reads one named entry as thirty-two bytes.
+func (m Material) Key(name string) ([32]byte, error) {
+	var k [32]byte
+	s, ok := m.Keys[name]
+	if !ok {
+		return k, fmt.Errorf("corpus: the material carries no %s", name)
+	}
+	b, err := hex.DecodeString(s)
+	if err != nil {
+		return k, err
+	}
+	if len(b) != 32 {
+		return k, fmt.Errorf("corpus: %s is %d bytes rather than thirty-two", name, len(b))
+	}
+	copy(k[:], b)
+	return k, nil
+}
+
+// LoadMaterial reads the fixed keys, from the same two homes Load reads.
+func LoadMaterial() (Material, error) {
+	raw, err := read("material")
+	if err != nil {
+		return Material{}, err
+	}
+	var m Material
+	err = json.Unmarshal(raw, &m)
+	return m, err
+}
+
 // Load reads one area by name, such as "notation" or "wire".
 //
 // The corpus has one home — kits/js/vectors, beside the kit that generates it
@@ -105,6 +142,16 @@ func (v Vector) Key(name string) ([32]byte, error) {
 // copy beside this file, and it is only ever reached when the shared corpus is
 // not there. Preferring the shared one is what keeps the copy a copy.
 func Load(area string) (File, error) {
+	raw, err := read(area)
+	if err != nil {
+		return File{}, err
+	}
+	var f File
+	err = json.Unmarshal(raw, &f)
+	return f, err
+}
+
+func read(area string) ([]byte, error) {
 	_, self, _, _ := runtime.Caller(0)
 	dir := filepath.Dir(self)
 
@@ -116,13 +163,8 @@ func Load(area string) (File, error) {
 	} {
 		raw, err = os.ReadFile(path)
 		if err == nil {
-			break
+			return raw, nil
 		}
 	}
-	if err != nil {
-		return File{}, err
-	}
-	var f File
-	err = json.Unmarshal(raw, &f)
-	return f, err
+	return nil, err
 }

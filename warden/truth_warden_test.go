@@ -315,3 +315,92 @@ func TestWhatMustSurviveARestartLivesInTheStore(t *testing.T) {
 		t.Fatal("a number spent before the restart was honoured after it")
 	}
 }
+
+// What a ground offers a voice that merely knocks is a record like any other:
+// a door that forgot it on a restart would quietly stop serving the thing it
+// was standing there to serve.
+func TestWhatAWardenExposesSurvivesARestart(t *testing.T) {
+	d := warden.NewMemory()
+	store := &warden.MemoryStore{}
+	aliceSeeds := seeds()
+	alice := open(t, d, aliceSeeds, store)
+	d.Attach("mem://alice", alice)
+	alice.Publish("mem://alice")
+
+	counter := &Counter{}
+	keys := warden.Keys{Secret: draw(), HeirSecret: draw()}
+	being, _, err := alice.Hold(counter, warden.Holding{
+		Blueprint: counterText, Keys: keys, Public: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	again := open(t, d, aliceSeeds, store)
+	d.Attach("mem://alice", again)
+	fresh := &Counter{}
+	if _, _, err := again.Hold(fresh, warden.Holding{Blueprint: counterText, Keys: keys}); err != nil {
+		t.Fatal(err)
+	}
+	// Held again without Public, and still exposed: the store is what says so.
+	if !again.Conceal(being) {
+		t.Fatal("the restart did not keep what the door exposes")
+	}
+}
+
+// A ground that knocks at a door as a stranger and later accepts an invitation
+// there holds two rows at that one far warden, each with its own voice. A
+// label resolved by warden and holder alone lands on whichever came first —
+// the knock's — and every ask down it is signed by a key with no standing.
+func TestALabelFindsTheRowItNamedAndNotTheFirstAtThatWarden(t *testing.T) {
+	d := warden.NewMemory()
+	store := &warden.MemoryStore{}
+	bobSeeds := seeds()
+	alice := open(t, d, seeds(), nil)
+	bob := open(t, d, bobSeeds, store)
+	d.Attach("mem://alice", alice)
+	d.Attach("mem://bob", bob)
+	alice.Publish("mem://alice")
+	bob.Publish("mem://bob")
+
+	counter := &Counter{}
+	if _, _, err := alice.Hold(counter, warden.Holding{Blueprint: counterText}); err != nil {
+		t.Fatal(err)
+	}
+	holder := &Counter{}
+	keys := warden.Keys{Secret: draw(), HeirSecret: draw()}
+	if _, _, err := bob.Hold(holder, warden.Holding{Blueprint: counterText, Keys: keys}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The stranger's row is made first, so a match that ignores the voice
+	// takes it.
+	if _, err := holder.Quo().Knock(alice.Card(nil), ""); err != nil {
+		t.Fatal(err)
+	}
+	inv, err := counter.Quo().Grant(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := sole(holder.Quo().Accept(context.Background(), inv, "counter"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := handle.Call(context.Background(), "bump"); !ok || v.(int64) != 1 {
+		t.Fatalf("bump answered %v %v", v, ok)
+	}
+
+	again := open(t, d, bobSeeds, store)
+	d.Attach("mem://bob", again)
+	fresh := &Counter{}
+	if _, _, err := again.Hold(fresh, warden.Holding{Blueprint: counterText, Keys: keys}); err != nil {
+		t.Fatal(err)
+	}
+	byLabel := again.Relation("counter")
+	if byLabel == nil {
+		t.Fatal("the label came back at no row")
+	}
+	if v, ok := byLabel.Call(context.Background(), "bump"); !ok || v.(int64) != 2 {
+		t.Fatalf("the label's row answered %v %v", v, ok)
+	}
+}

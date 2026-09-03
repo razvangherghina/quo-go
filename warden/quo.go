@@ -86,6 +86,22 @@ func (q *Quo) Amend(voice [32]byte, add, remove [][32]byte) error {
 // Release drops a being this ground holds, and every standing at it goes too.
 func (q *Quo) Release(being [32]byte) { q.w.Release(being) }
 
+// Expose offers a being to every voice, the stranger included; Conceal takes
+// it back. `Expose(nil)` opens the being itself, as `Grant(nil)` does.
+func (q *Quo) Expose(being *[32]byte) bool {
+	if being == nil {
+		return q.w.Expose(q.being)
+	}
+	return q.w.Expose(*being)
+}
+
+func (q *Quo) Conceal(being *[32]byte) bool {
+	if being == nil {
+		return q.w.Conceal(q.being)
+	}
+	return q.w.Conceal(*being)
+}
+
 // Accept turns an invitation received as data into handles, with the double
 // rotation done and impossible to forget. A standing names beings, so accepting
 // one answers a handle per being it names, and the caller tells them apart by

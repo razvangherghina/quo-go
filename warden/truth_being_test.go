@@ -197,6 +197,20 @@ func village(t *testing.T) *world {
 	return one
 }
 
+// The two names the notation can spell that the being already owns: it
+// provides Cells and Take rather than receiving them, so a blueprint
+// declaring either would make one name mean a caller's ask and the warden's
+// own migration hook at once.
+func TestABlueprintDeclaringCellsOrTakeIsRefused(t *testing.T) {
+	one := village(t)
+	for _, reserved := range []string{"cells", "take"} {
+		text := "Thing\n  " + reserved + "() bytes\n"
+		if _, _, err := one.phone.Hold(&Dog{}, warden.Holding{Blueprint: text}); err == nil {
+			t.Fatalf("a blueprint declaring %s was held", reserved)
+		}
+	}
+}
+
 func ctx() context.Context { return context.Background() }
 
 // sole is the handle of a standing that names one being, with the accept's own

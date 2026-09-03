@@ -564,6 +564,51 @@ func TestTheStrangerGetsOneRoom(t *testing.T) {
 	g.silent(g.judge(secret("passerby"), s))
 }
 
+// TestAnExposedBeingIsReachedByAStranger holds the other half of the one room:
+// a ground decides what it offers a voice that merely knocks, and until it
+// says so the answer is the warden's own being alone.
+func TestAnExposedBeingIsReachedByAStranger(t *testing.T) {
+	g := stand(t)
+	voice := arithmetic.SigningKey(secret("passerby"))
+
+	// Not exposed: the stranger reaches nothing of it.
+	s := g.say(voice, 1)
+	s.Being = &g.being
+	g.silent(g.judge(secret("passerby"), s))
+
+	if !g.w.Expose(g.being) {
+		t.Fatal("the warden would not expose a being it holds")
+	}
+	// Exposing a being it does not hold is refused rather than kept.
+	if g.w.Expose([32]byte{9}) {
+		t.Fatal("the warden exposed a being it does not hold")
+	}
+
+	estate := mustEstate(t, g.answer(g.judge(secret("passerby"), g.say(voice, 1))))
+	if len(estate.Classes) != 2 {
+		t.Fatalf("the stranger was shown %d classes rather than two", len(estate.Classes))
+	}
+	// And the being answers the stranger, which is the point of exposing it.
+	s = g.say(voice, 1)
+	s.Being = &g.being
+	s.Method = &envelope.Method{Name: "count", Args: []byte{}}
+	g.answer(g.judge(secret("passerby"), s))
+
+	// A stranger still spends no number and holds no row: exposure is not a
+	// standing, and the same envelope is not a replay.
+	g.answer(g.judge(secret("passerby"), s))
+
+	// Concealed, it is silence again and the house has one room.
+	if !g.w.Conceal(g.being) {
+		t.Fatal("the warden would not conceal what it had exposed")
+	}
+	g.silent(g.judge(secret("passerby"), s))
+	estate = mustEstate(t, g.answer(g.judge(secret("passerby"), g.say(voice, 1))))
+	if len(estate.Classes) != 1 {
+		t.Fatalf("the stranger was shown %d classes after concealing", len(estate.Classes))
+	}
+}
+
 // TestTheDoorPublishesItsLimit holds the only fact this document makes a
 // warden publish about itself, and that a caller need not learn by silence.
 func TestTheDoorPublishesItsLimit(t *testing.T) {

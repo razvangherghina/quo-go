@@ -54,6 +54,10 @@ type LabelRow struct {
 	// Holder is the being of this ground that spends that relation, because
 	// two of them may stand at one house and the label names one of the two.
 	Holder *[32]byte
+	// Voice is which row, because one being may hold two at one house — a
+	// stranger's row from a knock and an accepted one — and warden and holder
+	// alone do not tell them apart.
+	Voice *[32]byte
 	// At is every being reached under that label, with the class of each, so
 	// the handles can be rebuilt from the blueprint texts the store also kept.
 	At []ReachedRow
@@ -72,6 +76,9 @@ type Snapshot struct {
 	In         []InwardRow
 	Out        []OutwardRow
 	Labels     []LabelRow
+	// Public is what this door offers every voice, in ascending byte order so
+	// the snapshot does not differ from itself between runs.
+	Public [][32]byte
 }
 
 // Store is where a snapshot lives. Its shape is the warden's and its home is
@@ -137,8 +144,8 @@ func (w *Warden) snapshot() Snapshot {
 			local := *kept.local
 			one.Local = &local
 		} else if kept.row != nil {
-			far, holder := kept.row.warden, kept.row.holder
-			one.Far, one.Holder = &far, &holder
+			far, holder, voice := kept.row.warden, kept.row.holder, kept.row.voice
+			one.Far, one.Holder, one.Voice = &far, &holder, &voice
 			for _, at := range kept.at {
 				one.At = append(one.At, ReachedRow{Being: at.being, Digest: at.digest})
 			}
@@ -148,8 +155,15 @@ func (w *Warden) snapshot() Snapshot {
 	// The order is derived rather than chosen, because ranging a Go map is
 	// randomised and a snapshot that differed from itself between two runs
 	// would be a snapshot nobody can compare.
-	slices.SortFunc(s.In, func(a, b InwardRow) int { return compareKeys(a.Voice, b.Voice) })
-	slices.SortFunc(s.Out, func(a, b OutwardRow) int { return compareKeys(a.Warden, b.Warden) })
+	// Stable, because two rows at one warden compare equal and an unstable
+	// sort would order them differently between runs — which is the very
+	// thing the comment above says the snapshot must not do.
+	slices.SortStableFunc(s.In, func(a, b InwardRow) int { return compareKeys(a.Voice, b.Voice) })
+	slices.SortStableFunc(s.Out, func(a, b OutwardRow) int { return compareKeys(a.Warden, b.Warden) })
+	for being := range w.public {
+		s.Public = append(s.Public, being)
+	}
+	slices.SortFunc(s.Public, compareKeys)
 	return s
 }
 
@@ -174,6 +188,9 @@ func (w *Warden) restore() error {
 	w.hints = slices.Clone(kept.Hints)
 	for digest, text := range kept.Blueprints {
 		w.blueprints[digest] = text
+	}
+	for _, being := range kept.Public {
+		w.public[being] = true
 	}
 	for _, row := range kept.In {
 		beings := map[[32]byte]bool{}
@@ -222,7 +239,7 @@ func (w *Warden) restore() error {
 			local := *one.Local
 			w.labels[one.Label] = &label{local: &local}
 		case one.Far != nil:
-			rel := w.record.at(*one.Far, one.Holder)
+			rel := w.record.rowAt(*one.Far, one.Holder, one.Voice)
 			if rel == nil {
 				continue
 			}
